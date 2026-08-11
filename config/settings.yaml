@@ -1,0 +1,39 @@
+# NexusQuant Configuration
+
+project:
+  name: NexusQuant
+  version: 0.1.0
+  description: Multi-Asset Quantitative Trading System (FX, Metals, Commodities)
+
+data:
+  raw_path: data/raw
+  processed_path: data/processed
+  default_symbol: XAUUSD
+  default_timeframe: D1
+
+features:
+  ma_periods: [20, 50, 100, 200]
+  rsi_period: 14
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  bb_period: 20
+  bb_std: 2
+  adx_period: 14
+  atr_period: 14
+
+regime:
+  adx_trend_threshold: 25
+  adx_strong_threshold: 40
+  slope_lookback: 20
+
+risk:
+  max_risk_per_trade: 0.02        # 2%
+  min_reward_risk: 2.5
+  atr_stop_multiplier: 1.5
+  kelly_fraction: 0.5             # Half-Kelly
+
+backtest:
+  initial_capital: 100000
+  commission_per_lot: 7.0         # Example
+  slippage_pips: 0.5
