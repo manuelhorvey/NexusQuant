@@ -168,13 +168,20 @@ def _side_opportunity(
         risk = report.get("short_risk") or {}
         setup = risk.get("setup") or {}
         targets = report.get("short_targets") or {}
-        macro = (report.get("macro") or {}).get("gate") or {}
+        macro = (report.get("macro") or {}).get("gate_short") or {}
+        if not macro:
+            macro = (report.get("macro") or {}).get("gate") or {}
 
-    # Best family + score for this side (family_map is pre-sorted desc).
+    # Best family + score for this side. ``max`` by score (not dict order)
+    # so the book is robust to unsorted ``long_families``/``short_families``
+    # input (classify_setup pre-sorts, but this is a pure function over
+    # the report dict and must not depend on it).
     family = None
     family_score = None
     if family_map:
-        family, family_score = next(iter(family_map.items()))
+        family, family_score = max(
+            family_map.items(), key=lambda kv: kv[1] if kv[1] is not None else 0.0
+        )
         family_score = float(family_score)
 
     entry = setup.get("entry")
@@ -215,14 +222,23 @@ def _side_opportunity(
                 f"below live ML floor {min_ml_prob:.0%} (filter applies at pass level)"
             )
 
-    # Expected value: ONLY from a calibrated probability (never fabricated).
+    # Expected value: ONLY from a calibrated probability AND a real payoff
+    # basis (never fabricated). When no target ladder and no achieved R:R
+    # exist, EV is left None - assuming a 1.0R payoff would be a silent
+    # fabrication against the campaign's own "no fake EV" principle, and
+    # conservative FLAT is the honest behavior.
     expected_r: Optional[float] = None
+    payoff_basis: Optional[float] = None
     if prob is not None:
         p = float(prob)
-        # Conservative payoff: use the ladder best R:R if it clears the
-        # floor, else the achieved RR; EV = P*RR_win - (1-P)*1 - cost.
-        win_rr = ladder_best if (ladder_best or 0) >= 1.0 else rr or 1.0
-        expected_r = round(p * win_rr - (1.0 - p) * 1.0 - cost_r, 4)
+        # Conservative payoff: the ladder best R:R when it clears 1R, else
+        # the achieved RR. Only computed when one of them actually exists.
+        if ladder_best is not None and ladder_best >= 1.0:
+            payoff_basis = ladder_best
+        elif rr is not None:
+            payoff_basis = rr
+        if payoff_basis is not None:
+            expected_r = round(p * payoff_basis - (1.0 - p) * 1.0 - cost_r, 4)
 
     # BOOK-LEVEL rejection reasons (decision-relevant gates the EV winner
     # must pass): evidence bar, calibrated probability availability, EV,
@@ -234,6 +250,10 @@ def _side_opportunity(
         rejection.append("no setup family cleared the evidence bar")
     if prob is None:
         rejection.append("no calibrated model probability (EV not computed)")
+    elif payoff_basis is None:
+        rejection.append(
+            "no target ladder / payoff basis (EV not computed - would be fabricated)"
+        )
     elif expected_r is not None and expected_r <= 0:
         rejection.append(f"EV {expected_r:+.2f}R <= 0 after costs")
     if rr_ok is False and targets.get("targets"):
@@ -270,6 +290,7 @@ def _side_opportunity(
 def build_opportunity_book(
     report: Dict,
     *,
+    min_ev: float = DEFAULT_MIN_EV_R,
     min_rr: float = DEFAULT_MIN_RR,
     min_ml_prob: float = DEFAULT_MIN_ML_PROB,
     spread_points: Optional[float] = None,
@@ -313,10 +334,12 @@ def build_opportunity_book(
 
     ev_l = long_opp.expected_r
     ev_s = short_opp.expected_r
-    verdict_reasons: List[str] = []
-
-    # Path 1: no calibrated probability on either side -> engine-confirmed
+    verdict_reasons: List[
+        str
+    ] = []  # Path 1: no calibrated probability on either side -> engine-confirmed
     # rule path (both existing engines already enforce structure gates).
+    # When BOTH engines are confirmed, the higher engine score decides
+    # (evidence-driven, never an arbitrary long-first list order).
     if ev_l is None and ev_s is None:
         confirmed = [
             o
@@ -324,11 +347,12 @@ def build_opportunity_book(
             if o.reasons and any("CONFIRMED" in r for r in o.reasons)
         ]
         if confirmed:
-            chosen = confirmed[0]
+            chosen = max(confirmed, key=lambda o: _engine_score(report, o.direction))
             chosen.taken = True
             verdict_reasons.append(
                 "rule path (no calibrated ML probability): engine-confirmed "
-                f"{chosen.direction.upper()}"
+                f"{chosen.direction.upper()} "
+                f"(score {_engine_score(report, chosen.direction)})"
             )
             verdict = {
                 "direction": chosen.direction,
@@ -344,12 +368,12 @@ def build_opportunity_book(
                 "reason": "no calibrated probability and no engine-confirmed "
                 "setup on either side",
             }
-        return _book(symbol, long_opp, short_opp, verdict)
-
-    # Path 2: EV-aware decision (at least one calibrated side).
-    if ev_l is not None and ev_l > DEFAULT_MIN_EV_R and (ev_s is None or ev_l >= ev_s):
+        return _book(
+            symbol, long_opp, short_opp, verdict
+        )  # Path 2: EV-aware decision (at least one calibrated side).
+    if ev_l is not None and ev_l > min_ev and (ev_s is None or ev_l >= ev_s):
         chosen, other = long_opp, short_opp
-    elif ev_s is not None and ev_s > DEFAULT_MIN_EV_R:
+    elif ev_s is not None and ev_s > min_ev:
         chosen, other = short_opp, long_opp
     else:
         chosen = other = None
@@ -360,7 +384,7 @@ def build_opportunity_book(
             "status": "FLAT",
             "expected_r": max(ev_l or 0.0, ev_s or 0.0),
             "reason": (
-                f"no side clears EV floor (+{DEFAULT_MIN_EV_R:g}R): "
+                f"no side clears EV floor (+{min_ev:g}R): "
                 f"long {ev_l if ev_l is not None else 'n/a'}, "
                 f"short {ev_s if ev_s is not None else 'n/a'}"
             ),
@@ -402,6 +426,16 @@ def build_opportunity_book(
         "reason": "; ".join(verdict_reasons),
     }
     return _book(symbol, long_opp, short_opp, verdict)
+
+
+def _engine_score(report: Dict, direction: str) -> int:
+    """Engine confirmation score for a side (dip_score / rally_score)."""
+    key = "dip" if direction == "long" else "rally"
+    return int(
+        (report.get(key) or {}).get(
+            "dip_score" if direction == "long" else "rally_score", 0
+        )
+    )
 
 
 def _book(symbol, long_opp, short_opp, verdict) -> Dict:

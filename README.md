@@ -396,6 +396,59 @@ Surfaced everywhere: report **section 11d**, plan table **SETUP** column,
 scanner `setup / long_evidence / short_evidence / setup_ev` columns, and
 `--format plan` output.
 
+### Opportunity Book + EV decision engine (`src/analysis/opportunity.py`)
+
+On top of the classifier, every symbol produces a unified **Opportunity
+Book** — the two-sided campaign's decision layer:
+
+```bash
+python -m src.live.run --format diagnostics --symbols EURUSD,USDCAD,GBPJPY
+```
+
+Each symbol prints its verdict + per-side opportunities:
+
+```text
+USDCAD — VERDICT: SHORT (TRADE)
+  expected EV: +1.36R   why: EV path: SHORT EV +1.36R > long 0.8703
+
+SHORT OPPORTUNITY
+  setup      : SHORT_TREND_CONTINUATION (score 0.526)
+  probability: 60% · EV +1.36R · R:R 3.00 · cost 0.022R
+  reasons    : ... · calibrated P = 60%
+  TAKEN       ✓
+```
+
+* **Decision policy** — EV wins: LONG when its EV > SHORT EV and
+  EV > +0.2R, SHORT on the mirror, otherwise **FLAT with reasons**; the EV
+  winner still passes the hard gates (R:R floor, macro) or flips to FLAT.
+* **No fake probabilities** — EV is only computed from a *calibrated*
+  model probability; a missing model leaves EV `None` and the rule path
+  takes over (never `P(short) = 1 − P(long)`).
+* **Cost-aware** — settings slippage (pips, JPY-aware) is converted into R
+  and subtracted from EV.
+* **Every rejection is explained** — each non-taken side lists why
+  (evidence bar / no calibrated prob / EV≤0 / R:R floor / macro).
+
+Report section **11e** renders the same book inside the full institutional
+report, and the live alerts now carry explicit `🟢 LONG` / `🔴 SHORT`
+prefixes (spec #43).
+
+### Currency-leg portfolio exposure (spec #28/#29)
+
+`python -m src.risk.run --symbols ... --portfolio` now also aggregates
+**currency-leg exposure** — long EURJPY + GBPJPY + CADJPY is reported as
+one shared JPY-short leg, with directional-concentration warnings the
+symbol-level correlation matrix cannot see:
+
+```text
+Currency-leg exposure:
+  JPY    -300,000
+  EUR     +100,000
+  ...
+  gross 750,000 · net 50,000
+  ⚠ JPY carries 50% of gross exposure - directional concentration
+```
+
 **Historical opportunity census** (`src/analysis/census.py`) replays every
 bar causally (rolling-window classification, first-touch realized R) to
 answer the spec's central question: *does the engine see both sides?*

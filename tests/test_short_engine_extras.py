@@ -145,7 +145,9 @@ class LiveShortFilterTest(unittest.TestCase):
                     "rally_stage": "Confirmed",
                     "bias_score": -3,
                     "macro_gate": "PASS",
+                    "macro_gate_short": "PASS",
                     "ml_prob": 30.0,
+                    "ml_short_prob": 70.0,
                     "short_best_rr": 2.5,
                     "short_entry_zone": "150.0-150.5",
                     "short_invalidation": 151.0,
@@ -158,7 +160,9 @@ class LiveShortFilterTest(unittest.TestCase):
                     "rally_stage": "No Downtrend",
                     "bias_score": 1,
                     "macro_gate": "PASS",
+                    "macro_gate_short": "PASS",
                     "ml_prob": 55.0,
+                    "ml_short_prob": 40.0,
                     "short_best_rr": 1.0,
                     "short_entry_zone": None,
                     "short_invalidation": None,
@@ -175,14 +179,69 @@ class LiveShortFilterTest(unittest.TestCase):
         )
         self.assertEqual(f["symbol"].tolist(), ["USDJPY"])
 
-    def test_filter_ml_threshold_inverts_for_shorts(self):
+    def test_filter_ml_threshold_uses_short_model(self):
         from src.live.signals import filter_short_signals
 
         f = filter_short_signals(
-            self._table(), min_ml_prob=40.0, require_confirmed=False
+            self._table(), min_ml_prob=50.0, require_confirmed=False
         )
-        # USDJPY has ml 30 <= 60 (100-40) -> kept; EURUSD 55 > 60 -> dropped.
+        # USDJPY short-model prob 70 >= 50 -> kept; EURUSD 40 < 50 -> dropped.
         self.assertEqual(f["symbol"].tolist(), ["USDJPY"])
+
+    def test_filter_ml_threshold_ignores_inverted_long(self):
+        # The dedicated short model must gate the short side: a strong
+        # long-model read (ml_prob 90) must NOT be converted into a short
+        # rejection when the short model itself says short edge is high.
+        from src.live.signals import filter_short_signals
+
+        table = pd.DataFrame(
+            [
+                {
+                    "symbol": "X",
+                    "rally_score": 7,
+                    "rally_confirmed": "Yes",
+                    "bias_score": -3,
+                    "macro_gate_short": "PASS",
+                    "ml_prob": 90.0,
+                    "ml_short_prob": 70.0,
+                    "short_best_rr": 2.5,
+                }
+            ]
+        )
+        f = filter_short_signals(table, min_ml_prob=40.0, require_confirmed=False)
+        self.assertEqual(f["symbol"].tolist(), ["X"])
+
+    def test_filter_uses_short_direction_macro_gate(self):
+        # A symbol whose macro backdrop strongly favors the short must not
+        # be rejected by a long-favorable gate column.
+        from src.live.signals import filter_short_signals
+
+        table = pd.DataFrame(
+            [
+                {
+                    "symbol": "EURUSD",
+                    "rally_score": 7,
+                    "rally_confirmed": "Yes",
+                    "bias_score": -3,
+                    "macro_gate": "BLOCKED",
+                    "macro_gate_short": "PASS",
+                    "ml_short_prob": 70.0,
+                    "short_best_rr": 2.5,
+                },
+                {
+                    "symbol": "GBPUSD",
+                    "rally_score": 7,
+                    "rally_confirmed": "Yes",
+                    "bias_score": -3,
+                    "macro_gate": "PASS",
+                    "macro_gate_short": "BLOCKED",
+                    "ml_short_prob": 70.0,
+                    "short_best_rr": 2.5,
+                },
+            ]
+        )
+        f = filter_short_signals(table, require_confirmed=False)
+        self.assertEqual(f["symbol"].tolist(), ["EURUSD"])
 
     def test_short_rr_series_prefers_ladder(self):
         from src.live.signals import _short_rr_series

@@ -214,6 +214,27 @@ class TestGate(unittest.TestCase):
         self.assertEqual(r["risk"], "Risk-Off")
         self.assertEqual(r["rates"], "Neutral")
 
+    def test_short_gate_allows_headwind(self):
+        # A strong dollar is a headwind for a EURUSD LONG but a tailwind
+        # for a EURUSD SHORT - the short-direction gate must allow it.
+        row = {"dxy_score": 2, "vix_score": 0, "tnx_score": 0}
+        self.assertFalse(macro_gate("EURUSD", row, direction="long")["allowed"])
+        self.assertTrue(macro_gate("EURUSD", row, direction="short")["allowed"])
+
+    def test_short_gate_blocks_tailwind(self):
+        # A strong dollar is a tailwind for a USDJPY LONG and argues
+        # against fading it - the short-direction gate must block it.
+        row = {"dxy_score": 2, "vix_score": 0, "tnx_score": 0}
+        self.assertTrue(macro_gate("USDJPY", row, direction="long")["allowed"])
+        self.assertFalse(macro_gate("USDJPY", row, direction="short")["allowed"])
+
+    def test_long_gate_default_is_long(self):
+        row = {"dxy_score": 2, "vix_score": 0, "tnx_score": 0}
+        self.assertEqual(
+            macro_gate("EURUSD", row)["allowed"],
+            macro_gate("EURUSD", row, direction="long")["allowed"],
+        )
+
 
 class TestBacktestCompare(unittest.TestCase):
     @classmethod

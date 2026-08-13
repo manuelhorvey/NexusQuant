@@ -360,6 +360,12 @@ def scan_symbol(
         "macro_gate": (
             "PASS" if macro["gate"]["allowed"] else "BLOCKED" if macro else None
         ),
+        "macro_gate_short": (
+            "PASS"
+            if macro["gate_short"]["allowed"]
+            else "BLOCKED"
+            if macro else None
+        ),
         "rating": rating,
         "pattern": (
             f"{best_pattern['name']} {best_pattern['prob']}%" if best_pattern else None
@@ -443,6 +449,7 @@ def scan_universe(
             "macro_bias",
             "macro_label",
             "macro_gate",
+            "macro_gate_short",
             "rating",
             "pattern",
             "setup",

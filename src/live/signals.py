@@ -266,7 +266,7 @@ def format_alert(setup: Dict) -> str:
     macro = report.get("macro") or {}
 
     lines = [
-        f"🎯 {s} — BUY-THE-DIP CONFIRMED",
+        f"🟢 LONG {s} — BUY-THE-DIP CONFIRMED",
         f"   Close {report['last_close']:,.5f} · {report['last_date']}",
     ]
     lines.append(
@@ -330,6 +330,12 @@ def filter_short_signals(
     gate PASS, ML probability above a threshold when available, minimum
     rally score). ``max_bias`` keeps rows whose bias is at most this
     (default +4 = anything) - pass 0 to require a bearish bias.
+
+    The ML filter uses the DEDICATED short model's ``ml_short_prob``
+    column (the scanner's ``predict_short_series`` output) when present,
+    so a strong short-model read keeps the setup. Legacy rows with only
+    ``ml_prob`` (the long model) fall back to the inverted long
+    probability so pre-short-model tables still filter gracefully.
     """
     f = table.copy()
     f = f[f["rally_score"] >= min_rally_score]
@@ -337,12 +343,18 @@ def filter_short_signals(
         f = f[f["rally_confirmed"] == "Yes"]
     if "bias_score" in f:
         f = f[f["bias_score"] <= max_bias]
-    if min_ml_prob is not None and "ml_prob" in f:
-        has_ml = f["ml_prob"].notna()
-        f = f[~has_ml | (f["ml_prob"] <= (100.0 - min_ml_prob))]
-    if require_macro_pass and "macro_gate" in f:
-        no_macro = f["macro_gate"].isna()
-        f = f[no_macro | (f["macro_gate"] == "PASS")]
+    if min_ml_prob is not None:
+        if "ml_short_prob" in f and f["ml_short_prob"].notna().any():
+            has_ml = f["ml_short_prob"].notna()
+            f = f[~has_ml | (f["ml_short_prob"] >= min_ml_prob)]
+        elif "ml_prob" in f:
+            has_ml = f["ml_prob"].notna()
+            f = f[~has_ml | (f["ml_prob"] <= (100.0 - min_ml_prob))]
+    if require_macro_pass:
+        gate_col = "macro_gate_short" if "macro_gate_short" in f else "macro_gate"
+        if gate_col in f:
+            no_macro = f[gate_col].isna()
+            f = f[no_macro | (f[gate_col] == "PASS")]
     if min_rr is not None:
         rr = _short_rr_series(f)
         f = f[rr.isna() | (rr >= min_rr)]
@@ -415,7 +427,7 @@ def format_short_alert(setup: Dict) -> str:
     macro = report.get("macro") or {}
 
     lines = [
-        f"🔻 {s} — SELL-THE-RALLY CONFIRMED",
+        f"🔴 SHORT {s} — SELL-THE-RALLY CONFIRMED",
         f"   Close {report['last_close']:,.5f} · {report['last_date']}",
     ]
     lines.append(

@@ -591,17 +591,16 @@ def classify_setup(
     )
 
     # Blend calibrated ML probabilities when present (they are per-side).
+    # A legitimate 0.0 calibrated probability is valid evidence, not
+    # "missing" - explicit None checks only. When no calibrated ML exists,
+    # probs stay None so the decision layer NEVER fabricates a probability
+    # from evidence scores (the "no fake probabilities" campaign rule).
     prob_long = prob_short = None
     if ml:
-        prob_long = ml.get("prob_long") or ml.get("prob")
+        prob_long = ml.get("prob_long")
+        if prob_long is None:
+            prob_long = ml.get("prob")
         prob_short = ml.get("prob_short")
-    if prob_long is None and prob_short is None:
-        # Evidence-normalized fallback (NOT a calibrated probability - the
-        # caller must prefer the calibrated ML when available).
-        total = long_score + short_score
-        if total > 0:
-            prob_long = long_score / total
-            prob_short = short_score / total
 
     evidence = _build_evidence(t, m, s, d, p, rg, families, direction)
 

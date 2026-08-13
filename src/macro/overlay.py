@@ -523,19 +523,43 @@ def macro_bias_series(symbol: str, aligned: pd.DataFrame) -> pd.Series:
     return pd.Series(np.clip(raw, -2, 2), index=aligned.index)
 
 
-def macro_gate(symbol: str, scores_row: Dict, min_bias: float = -0.5) -> Dict:
-    """Gate a signal: allowed unless the macro bias is a strong headwind."""
+def macro_gate(
+    symbol: str,
+    scores_row: Dict,
+    min_bias: float = -0.5,
+    direction: str = "long",
+) -> Dict:
+    """
+    Gate a signal: allowed unless the macro backdrop strongly opposes the
+    trade's direction.
+
+    ``bias`` is the symbol's macro *tailwind* (positive = bullish backdrop).
+    For a LONG the gate blocks strong headwinds (``bias < min_bias``); for
+    a SHORT the gate blocks strong tailwinds (``bias > -min_bias``) - a
+    strong bullish macro backdrop argues against fading it. Symmetric by
+    default (``min_bias=-0.5`` -> longs blocked below -0.5, shorts blocked
+    above +0.5).
+    """
     bias = macro_bias_for_symbol(symbol, scores_row)
-    allowed = bias["bias"] >= min_bias
+    if direction == "short":
+        allowed = bias["bias"] <= -min_bias
+        reason = (
+            "ok"
+            if allowed
+            else f"{bias['label']} (bias {bias['bias']:+.2f} > {-min_bias})"
+        )
+    else:
+        allowed = bias["bias"] >= min_bias
+        reason = (
+            "ok"
+            if allowed
+            else f"{bias['label']} (bias {bias['bias']:+.2f} < {min_bias})"
+        )
     return {
         "allowed": allowed,
         "bias": bias["bias"],
         "label": bias["label"],
-        "reason": (
-            "ok"
-            if allowed
-            else f"{bias['label']} (bias {bias['bias']:+.2f} < {min_bias})"
-        ),
+        "reason": reason,
     }
 
 
@@ -560,9 +584,12 @@ def gate_series(
     index: pd.DatetimeIndex,
     min_bias: float = -0.5,
     shift_days: int = 1,
+    direction: str = "long",
 ) -> pd.Series:
     """
-    Causal boolean series: is the macro backdrop acceptable for ``symbol``?
+    Causal boolean series: is the macro backdrop acceptable for ``symbol``
+    in the given ``direction`` (long = block strong headwinds; short =
+    block strong tailwinds)?
 
     One bool per bar in ``index`` (aligned + forward-filled, macro state as
     of the prior day). Bars before the first usable macro row default to
@@ -572,7 +599,10 @@ def gate_series(
         return pd.Series(True, index=index)
     aligned = align_scores(scores, index, shift_days=shift_days)
     allowed = aligned.apply(
-        lambda row: macro_gate(symbol, row.to_dict(), min_bias)["allowed"], axis=1
+        lambda row: macro_gate(
+            symbol, row.to_dict(), min_bias, direction=direction
+        )["allowed"],
+        axis=1,
     )
     return allowed.fillna(True)
 
@@ -762,7 +792,8 @@ def macro_report_for_symbol(
     out = {
         "regime": macro_regime(row_dict),
         "bias": macro_bias_for_symbol(symbol, row_dict),
-        "gate": macro_gate(symbol, row_dict),
+        "gate": macro_gate(symbol, row_dict, direction="long"),
+        "gate_short": macro_gate(symbol, row_dict, direction="short"),
     }
     if df is not None:
         out["sensitivities"] = macro_sensitivities(symbol, df, data_dir, cache_dir)

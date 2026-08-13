@@ -54,6 +54,55 @@ def _load_settings() -> dict:
         return {}
 
 
+def diagnostics_reports(
+    group: Optional[str],
+    timeframe: str,
+    symbols: Optional[List[str]] = None,
+    data_dir: str = "data/raw",
+) -> int:
+    """
+    Directional diagnostics (campaign spec #24): per symbol, the full
+    opportunity book - LONG/SHORT/FLAT verdict with EV, per-side setup /
+    probability / EV / R:R, and every rejection reason. Answers "what are
+    the opportunities here, and why was each one taken or rejected?".
+    ``data_dir`` mirrors ``institutional_reports`` (default ``data/raw``).
+    """
+    from src.data.loader import clean_data, load_data
+    from src.features.indicators import add_all_indicators
+    from src.features.regime import detect_regime
+    from src.analysis.report import generate_full_report
+    from src.analysis.opportunity import format_opportunity_book
+    from src.analysis.scanner import _data_path, discover_symbols
+
+    if symbols is None:
+        symbols = discover_symbols(data_dir, group, timeframe)
+    if not symbols:
+        print("No symbols found.", file=sys.stderr)
+        return 0
+
+    n = 0
+    for sym in symbols:
+        try:
+            path = _data_path(sym, data_dir, group, timeframe)
+            df = clean_data(load_data(path, symbol=sym))
+            df = add_all_indicators(df)
+            df = detect_regime(df)
+            report = generate_full_report(
+                df, symbol=sym, group=group, data_dir=data_dir, mtf=False
+            )
+            ob = report.get("opportunity_book")
+            if ob:
+                print(format_opportunity_book(ob))
+            else:
+                v = (report.get("plan") or {}).get("action", "NO-SETUP")
+                print(f"{sym} — no opportunity book (plan: {v})")
+            print("=" * 60)
+            n += 1
+        except Exception as exc:
+            print(f"[{sym}] diagnostics failed: {exc}", file=sys.stderr)
+    return n
+
+
 def institutional_reports(
     group: Optional[str],
     timeframe: str,
@@ -142,11 +191,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument(
         "--format",
-        choices=["briefing", "institutional", "plan"],
+        choices=["briefing", "institutional", "plan", "diagnostics"],
         default="briefing",
         help="briefing = compact alert pass; institutional = "
         "full 18-section report per symbol; plan = one-action-per-symbol "
-        "decision table (BUY/SELL-LIMIT · WAIT-* · NO-SETUP)",
+        "decision table (BUY/SELL-LIMIT · WAIT-* · NO-SETUP); "
+        "diagnostics = per-symbol opportunity book (LONG/SHORT/FLAT + "
+        "EV + rejection reasons)",
     )
     parser.add_argument(
         "--hmm",
@@ -261,6 +312,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.format == "institutional":
         n = institutional_reports(group, timeframe, symbols, use_hmm=args.hmm)
+        return 0 if n else 1
+
+    if args.format == "diagnostics":
+        n = diagnostics_reports(group, timeframe, symbols)
         return 0 if n else 1
 
     if args.format == "plan":

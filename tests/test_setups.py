@@ -194,6 +194,28 @@ class TestExpectedValue(unittest.TestCase):
         self.assertIsNone(expected_value(None, avg_win_r=2.0))
         self.assertIsNone(probability_weighted_rr([], prob_win=None))
 
+    def test_no_fabricated_probability_without_ml(self):
+        # Without a calibrated ML probability the classifier must NOT
+        # invent prob_long/prob_short from evidence scores (the "no fake
+        # probability" rule). EV consumers must see None, never a
+        # fabricated value.
+        df = _trending_frame(up=True)
+        s = classify_setup(df, ml=None)
+        self.assertIsNone(s["prob_long"])
+        self.assertIsNone(s["prob_short"])
+        self.assertIsNotNone(s["long_score"])
+        self.assertIsNotNone(s["short_score"])
+
+    def test_zero_probability_not_treated_as_missing(self):
+        # A legitimate 0.0 calibrated probability must survive the
+        # prob_long fallback (explicit None checks, not truthiness).
+        df = _trending_frame(up=True)
+        s = classify_setup(
+            df, ml={"prob": 0.9, "prob_long": 0.0, "prob_short": 0.8}
+        )
+        self.assertEqual(s["prob_long"], 0.0)
+        self.assertEqual(s["prob_short"], 0.8)
+
     def test_pwrr_single_target_equals_ev(self):
         ladder = [{"target": "T1", "rr": 2.5}]
         pw = probability_weighted_rr(ladder, prob_win=0.6)

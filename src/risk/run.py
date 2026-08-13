@@ -465,7 +465,11 @@ def currency_exposure(positions: List[dict]) -> dict:
     Returns ``{exposure: {CCY: notional}, gross, net, largest, warnings}``.
     Sign convention: long = +base/-quote; short = -base/+quote. Non-FX
     instruments (equity/index/crypto single assets) contribute a single leg
-    on their own symbol.
+    on their own symbol - a documented simplification: a metal like
+    XAUUSD is economically USD-denominated but is bucketed as its own
+    "XAUUSD" leg, so USD concentration from metals is understated (the
+    correlation matrix still captures the overlap; a future refinement
+    could map metals/commodities into their quote currency).
     """
     from src.macro.overlay import _symbol_class
 

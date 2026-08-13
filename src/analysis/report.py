@@ -38,6 +38,24 @@ from src.model.model import (
     predict_series,
 )
 
+_SETTINGS_CACHE: Optional[dict] = None
+
+
+def _settings_slippage_pips() -> Optional[float]:
+    """Settings slippage (pips) for the cost model, memoized at module
+    level - universe scans generate one report per symbol, so the yaml
+    read must not happen per symbol (mirrors the macro frame cache)."""
+    global _SETTINGS_CACHE
+    try:
+        if _SETTINGS_CACHE is None:
+            import yaml
+
+            with open("config/settings.yaml") as _f:
+                _SETTINGS_CACHE = yaml.safe_load(_f) or {}
+        return (_SETTINGS_CACHE.get("backtest") or {}).get("slippage_pips")
+    except Exception:
+        return None
+
 
 def generate_full_report(
     df: pd.DataFrame,
@@ -408,23 +426,14 @@ def generate_full_report(
         # (campaign spec #9/#18/#46): per-side opportunities with explicit
         # rejection reasons and a verdict driven by expected value when
         # calibrated probabilities exist. Cost model: settings slippage
-        # (pips) converted to R via the stop distance; JPY pairs use 0.01
-        # pips, everything else 0.0001.
+        # (pips, memoized) converted to R via the stop distance; JPY pairs
+        # use 0.01 pips, everything else 0.0001.
         try:
             from src.analysis.opportunity import build_opportunity_book
 
-            slip = None
-            try:
-                import yaml
-
-                with open("config/settings.yaml") as _f:
-                    _cfg = yaml.safe_load(_f) or {}
-                slip = (_cfg.get("backtest") or {}).get("slippage_pips")
-            except Exception:
-                slip = None
             pip = 0.01 if symbol.upper().endswith("JPY") else 0.0001
             report["opportunity_book"] = build_opportunity_book(
-                report, slippage_pips=slip, pip_size=pip
+                report, slippage_pips=_settings_slippage_pips(), pip_size=pip
             )
         except Exception:
             pass

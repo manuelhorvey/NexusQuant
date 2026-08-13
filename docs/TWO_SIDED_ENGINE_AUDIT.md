@@ -239,11 +239,86 @@ Two findings from the code review were fixed and regression-tested:
 
 ---
 
+## 7b. Campaign Addendum: Opportunity Book + EV-Aware Decision Engine
+
+Round 2 of the two-sided campaign added the **decision layer** on top of the
+classifier: a unified ``Opportunity`` representation, an EV-driven
+LONG/SHORT/FLAT verdict, explainable rejections, cost-aware EV, currency-leg
+portfolio exposure and a diagnostics view.
+
+### New / changed
+
+| File | Change |
+|------|--------|
+| `src/analysis/opportunity.py` (NEW) | ``Opportunity`` dataclass + ``build_opportunity_book()`` (per-side setup / probability / EV / R:R / rejection reasons) + EV-aware decision engine; ``roundtrip_cost_r()`` converts settings slippage (pips, JPY-aware) into R; ``format_opportunity_book()`` renders the diagnostics view |
+| `src/analysis/report.py` | section **11e Opportunity Book** (verdict + per-side P/EV/RR/reasons) built in `generate_full_report`; cost-aware EV wired from settings |
+| `src/risk/run.py` | ``currency_exposure()`` - currency-leg aggregation (long EURJPY = +EUR/-JPY; 3 JPY crosses = one JPY-short) with directional-concentration warnings; portfolio report + CLI show the leg view |
+| `src/live/run.py` | ``--format diagnostics`` (per-symbol opportunity book) |
+| `src/live/signals.py` | alerts prefixed `🟢 LONG` / `🔴 SHORT` (spec #43) |
+| `tests/test_opportunity.py` (NEW) | 16 tests: EV decision (long/short/flat), no-fabricated-probability, explainable rejections, macro-block, cost model, JPY pip scaling, currency exposure |
+
+### Decision policy (implemented in `build_opportunity_book`)
+
+1. EV is computed **only** from a calibrated model probability - never
+   fabricated (`P(short) = 1 - P(long)` is NOT used; a missing model leaves
+   EV `None` and the rule path takes over).
+2. EV path: LONG wins when its EV > SHORT EV and EV > +0.2R; SHORT wins on
+   the mirror; neither clears the floor -> **FLAT with reasons**. The EV
+   winner must still pass the hard gates (R:R floor, macro) or it flips to
+   FLAT.
+3. The ML-probability floor (55%) is a **live-filter** concern, not a book
+   gate - it is reported as an informational note so a 54% / +1.1R setup is
+   shown honestly as a pass-level filter rejection, never as a book-level
+   contradiction.
+4. Every non-taken opportunity carries explicit rejection reasons (evidence
+   bar / no calibrated prob / EV<=0 / R:R floor / macro) - spec #25.
+
+### Example (live, USDCAD)
+
+```
+USDCAD - VERDICT: SHORT (TRADE)
+  expected EV: +1.36R
+  why        : EV path: SHORT EV +1.36R > long 0.8703
+
+SHORT OPPORTUNITY
+  setup      : SHORT_TREND_CONTINUATION (score 0.526)
+  probability: 60% · EV +1.36R · R:R 3.00 · cost 0.022R
+  reasons    : best family SHORT_TREND_CONTINUATION (0.53); rally engine
+               forming (score 2, not confirmed); calibrated P = 60%
+  TAKEN       ✓
+```
+
+Note the engine is NOT confirmed here - the book took the short on
+calibrated probability + EV alone (exactly the campaign's direction-first
+architecture).
+
+### Currency-leg exposure (spec #28/#29)
+
+```
+positions: LONG EURJPY + LONG GBPJPY + LONG CADJPY (100k each)
+-> exposure JPY: -300,000 (one shared JPY-short leg)
+   WARN: JPY carries 50% of gross exposure - directional concentration
+```
+
+---
+
 ## 8. Remaining Limitations (explicit)1. **Setup-family win rates are not yet separately validated.** The census records
    realized R per side; per-family sample-size/expectancy/PF tables are the
    next step (spec §21–§22) — remove families with no demonstrable edge.
    (The per-side win-rate split above is directional evidence, not yet a
    statistically validated edge per family.)
+2. **The EV decision uses a fixed +0.2R threshold and a conservative
+   win-R:R assumption** (ladder best when >= 1R). A calibrated per-target
+   model (P per TP) would make both the EV and the probability-weighted
+   R:R more precise; the current values are documented approximations.
+3. **P(flat) is implicit, not modeled** - the campaign spec's
+   P(Long)/P(Short)/P(Flat) trinity is represented as "FLAT when neither
+   side clears EV", which is honest but not a calibrated three-way
+   probability. Training a 3-class head is future work.
+4. **The live pass does not yet consume the opportunity-book verdict** - it
+   still filters on engine confirmation + ML floor. Wiring the EV verdict
+   into the live filter (with the book as the decision source) is the
+   natural next integration step.
 2. **Probability-weighted R:R uses a geometric-decay proxy** (documented in-code)
    rather than a calibrated per-target model; it is labeled approximate.
 3. **EV uses a 2.5R average-win assumption** when only P(win) is available; the
