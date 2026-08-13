@@ -20,7 +20,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -452,6 +452,84 @@ def _print_stress(plan: dict) -> None:
     print("=" * 74 + "\n")
 
 
+def currency_exposure(positions: List[dict]) -> dict:
+    """
+    Aggregate portfolio exposure per currency leg (campaign spec #28/#29).
+
+    A long EURUSD position is a long-EUR / short-USD exposure; three JPY
+    crosses (EURJPY + GBPJPY + CADJPY) are a concentrated JPY-SHORT
+    position even though the symbols look independent. This function maps
+    every position to its base/quote legs via ``_symbol_class`` (the same
+    classifier the macro overlay uses) and sums signed notionals.
+
+    Returns ``{exposure: {CCY: notional}, gross, net, largest, warnings}``.
+    Sign convention: long = +base/-quote; short = -base/+quote. Non-FX
+    instruments (equity/index/crypto single assets) contribute a single leg
+    on their own symbol.
+    """
+    from src.macro.overlay import _symbol_class
+
+    exposure: Dict[str, float] = {}
+    details = []
+    for pos in positions:
+        sym = str(pos.get("symbol", "?"))
+        notional = float(pos.get("notional") or 0.0)
+        direction = pos.get("direction", "long")
+        sign = 1.0 if direction == "long" else -1.0
+        try:
+            kind, detail = _symbol_class(sym)
+        except Exception:
+            kind, detail = ("equity", sym)
+        if kind == "fx" and isinstance(detail, tuple) and len(detail) == 2:
+            base, quote = detail
+            legs = [(base, sign), (quote, -sign)]
+            leg_desc = f"{base} {sign:+.0f} / {quote} {-sign:+.0f}"
+        else:
+            legs = [(sym, sign)]
+            leg_desc = f"{sym} {sign:+.0f}"
+        for ccy, s in legs:
+            exposure[ccy] = exposure.get(ccy, 0.0) + s * notional
+        details.append(
+            {
+                "symbol": sym,
+                "direction": direction,
+                "notional": round(notional, 2),
+                "legs": leg_desc,
+            }
+        )
+
+    gross = sum(abs(v) for v in exposure.values())
+    net = sum(exposure.values())
+    if not exposure:
+        largest = None
+    else:
+        largest = max(exposure.items(), key=lambda kv: abs(kv[1]))
+
+    warnings = []
+    if gross > 0:
+        # Same-side concentration: a single currency carrying >= 40% of
+        # gross exposure is a directional concentration the correlation
+        # matrix alone can hide - e.g. three JPY crosses LONG are one big
+        # JPY-SHORT (the campaign's canonical example).
+        for ccy, v in sorted(exposure.items(), key=lambda kv: -abs(kv[1]))[:2]:
+            share = abs(v) / gross
+            if share >= 0.4:
+                warnings.append(
+                    f"{ccy} carries {share:.0%} of gross exposure "
+                    f"({v:+,.0f}) - directional concentration "
+                    f"(e.g. N JPY crosses can hide one shared leg)"
+                )
+
+    return {
+        "exposure": {k: round(v, 2) for k, v in exposure.items()},
+        "gross": round(gross, 2),
+        "net": round(net, 2),
+        "largest": largest,
+        "warnings": warnings,
+        "details": details,
+    }
+
+
 def portfolio_report(
     symbols: List[str],
     group: Optional[str],
@@ -524,6 +602,14 @@ def portfolio_report(
             "correlation_checks": [],
             "top_correlated_pairs": [],
             "vols": {},
+            "currency_exposure": {
+                "exposure": {},
+                "gross": 0.0,
+                "net": 0.0,
+                "largest": None,
+                "warnings": [],
+                "details": [],
+            },
         }
 
     if not rets:
@@ -585,6 +671,17 @@ def portfolio_report(
         if chk["allowed"]:
             holdings.append(pos["symbol"])
 
+    currency = currency_exposure(
+        [
+            {
+                "symbol": pos["symbol"],
+                "direction": pos.get("direction", "long"),
+                "notional": pos["qty"] * pos["entry"],
+            }
+            for pos in positions
+        ]
+    )
+
     return {
         "symbols": list(returns.columns),
         "n_setups": len(plans),
@@ -616,6 +713,10 @@ def portfolio_report(
         else 0.0,
         "correlation_checks": limit_checks,
         "vols": {s: round(float(v) * 100, 3) for s, v in vols.items()},
+        # Currency-leg exposure (spec #28/#29): JPY-short concentration via
+        # EURJPY+GBPJPY+CADJPY is invisible to a symbol-level correlation
+        # matrix - the leg view surfaces it.
+        "currency_exposure": currency,
     }
 
 
@@ -724,6 +825,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"  {d} {pos['symbol']:<10} notional {pos['notional']:>14,.0f} "
                 f"risk {pos['risk_usd']:>10,.0f}"
             )
+        ce = rep.get("currency_exposure") or {}
+        if ce.get("exposure"):
+            print("\nCurrency-leg exposure (spec #28/#29):")
+            for ccy, v in sorted(ce["exposure"].items(), key=lambda kv: -abs(kv[1])):
+                print(f"  {ccy:<6} {v:+,.0f}")
+            print(f"  gross {ce['gross']:,.0f} · net {ce['net']:,.0f}")
+            for w in ce.get("warnings", []):
+                print(f"  ⚠ {w}")
         print("\nCorrelation-aware limit checks:")
         for chk in rep["correlation_checks"]:
             mark = "OK " if chk["allowed"] else "BLOCK"
