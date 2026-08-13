@@ -744,12 +744,25 @@ def format_briefing(result: Dict) -> str:
             "\nNo new high-conviction setups. "
             f"({result['candidates']} candidates, "
             f"{result['skipped_dup']} already alerted, "
-            f"{result.get('sizing_failed', 0)} no risk setup)"
+            f"{result.get('sizing_failed', 0)} no risk setup"
+            + (
+                f", {result['conflicts_resolved']} dual-side conflict "
+                "arbitrated to FLAT)"
+                if result.get("conflicts_resolved")
+                else ")"
+            )
         )
         return "\n".join(lines)
 
     lines.append(f"\n🎯 {len(alerts)} new setup(s)")
     for a in alerts:
         lines.append("\n" + a["text"])
-    lines.append("\n— filters: dip confirmed + macro PASS + sized setup —")
+    foot = "— filters: dip confirmed + macro PASS + sized setup —"
+    if result.get("conflicts_resolved"):
+        foot = (
+            f"— filters: dip/rally confirmed + macro PASS + sized setup; "
+            f"{result['conflicts_resolved']} dual-side conflict(s) "
+            f"arbitrated by EV —"
+        )
+    lines.append("\n" + foot)
     return "\n".join(lines)

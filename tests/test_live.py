@@ -572,5 +572,79 @@ class TestPassIntegration(unittest.TestCase):
                 self.assertNotEqual(a["key"], seeded)
 
 
+class TestMergePassAlerts(unittest.TestCase):
+    """Dual-side live alerts must be arbitrated by the opportunity book
+    verdict - one symbol can never fire BOTH directions in one pass."""
+
+    @staticmethod
+    def _alert(symbol, direction="long", verdict=None):
+        return {
+            "symbol": symbol,
+            "key": f"{symbol}-{direction}",
+            "text": f"{direction} {symbol}",
+            "report": (
+                {}
+                if verdict is None
+                else {
+                    "opportunity_book": {
+                        "verdict": {
+                            "direction": verdict,
+                            "status": "TRADE" if verdict != "flat" else "FLAT",
+                            "expected_r": 0.5 if verdict != "flat" else None,
+                        }
+                    }
+                }
+            ),
+            "direction": direction,
+        }
+
+    def test_single_side_passes_through(self):
+        from src.live.run import merge_pass_alerts
+
+        long_only = [self._alert("A")]
+        short_only = [self._alert("B", "short")]
+        kept, conflicts = merge_pass_alerts(long_only, short_only)
+        self.assertEqual(conflicts, 0)
+        self.assertEqual({a["symbol"] for a in kept}, {"A", "B"})
+
+    def test_dual_fire_keeps_verdict_direction(self):
+        from src.live.run import merge_pass_alerts
+
+        long_alerts = [self._alert("EURUSD", verdict="long")]
+        short_alerts = [self._alert("EURUSD", "short", verdict="long")]
+        kept, conflicts = merge_pass_alerts(long_alerts, short_alerts)
+        self.assertEqual(conflicts, 1)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["direction"], "long")
+
+    def test_dual_fire_short_verdict_keeps_short(self):
+        from src.live.run import merge_pass_alerts
+
+        long_alerts = [self._alert("USDJPY", verdict="short")]
+        short_alerts = [self._alert("USDJPY", "short", verdict="short")]
+        kept, conflicts = merge_pass_alerts(long_alerts, short_alerts)
+        self.assertEqual(conflicts, 1)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["direction"], "short")
+
+    def test_dual_fire_flat_drops_both(self):
+        from src.live.run import merge_pass_alerts
+
+        long_alerts = [self._alert("GBPUSD", verdict="flat")]
+        short_alerts = [self._alert("GBPUSD", "short", verdict="flat")]
+        kept, conflicts = merge_pass_alerts(long_alerts, short_alerts)
+        self.assertEqual(conflicts, 1)
+        self.assertEqual(kept, [])
+
+    def test_no_book_degrades_to_concatenation(self):
+        from src.live.run import merge_pass_alerts
+
+        long_alerts = [self._alert("EURUSD")]
+        short_alerts = [self._alert("EURUSD", "short")]
+        kept, conflicts = merge_pass_alerts(long_alerts, short_alerts)
+        self.assertEqual(conflicts, 0)
+        self.assertEqual(len(kept), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -191,3 +191,23 @@ Audited the training + serve path of the two calibrated models
   though its OOS AUC (0.5836) slightly beats the long (0.5775). Retraining the
   short model with `--search` when more rally data accumulates is recommended,
   but no pipeline change is required.
+
+## 12. Phase 4 addendum: EV-driven live alert merge (2026-08-13)
+
+Closed the phase-1 gap "live path bypasses the opportunity book": in `--mode
+both`, `_merge_long_short` was a bare concatenation (`long["new_alerts"] +
+short["new_alerts"]`), so a symbol could in principle fire BOTH a LONG and a
+SHORT alert in the same pass (the opposing SMA200 gates structurally prevent
+it, but nothing enforced it).
+
+**Fix:** added `merge_pass_alerts` in `src/live/run.py`. When a symbol appears
+in both passes, the EV-driven `opportunity_book.verdict.direction` (embedded
+in every alert's report via `generate_full_report`) arbitrates: keep the
+verdict's side, drop the other; a FLAT verdict drops both (FLAT = no
+acceptable opportunity). Symbols that cleared only one side pass through
+unchanged. When an alert's report carries no book, it degrades to the prior
+concatenation (graceful).
+
+Surfaced in the merged result as `conflicts_resolved` and rendered in the
+briefing footer / JSON output. `format_briefing` counts conflicts arbitrated
+to FLAT in the no-alert line. +5 regression tests. 558 tests OK, 2 skipped.

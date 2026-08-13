@@ -54,6 +54,65 @@ def _load_settings() -> dict:
         return {}
 
 
+def _book_verdict_direction(alert: dict) -> Optional[str]:
+    """Opportunity-book verdict direction for an alert's report (None when
+    the report carries no book - e.g. an older or degraded path)."""
+    book = (alert.get("report") or {}).get("opportunity_book") or {}
+    return (book.get("verdict") or {}).get("direction")
+
+
+def merge_pass_alerts(
+    long_alerts: List[dict], short_alerts: List[dict]
+) -> tuple:
+    """
+    Combine the long and short pass alerts, resolving dual-fire symbols via
+    the EV-driven opportunity book verdict.
+
+    A bare concatenation would let one symbol fire BOTH a LONG and a SHORT
+    alert in the same pass (the SMA200 gates structurally prevent it, but
+    nothing enforces it). When a symbol appears on both sides, the book's
+    verdict arbitrates: keep the verdict's direction, drop the other; a
+    FLAT verdict drops both (FLAT = no acceptable opportunity). Symbols
+    that cleared only one side pass through unchanged.
+
+    Returns ``(kept, conflicts)`` where ``conflicts`` counts the symbols
+    arbitrated. When no book is present in any of a symbol's reports, its
+    alerts pass through unmodified (graceful degradation to the prior
+    concatenation behavior).
+    """
+    by_symbol: dict = {}
+    for a in long_alerts:
+        by_symbol.setdefault(a["symbol"], []).append(a)
+    for a in short_alerts:
+        by_symbol.setdefault(a["symbol"], []).append(a)
+
+    kept: List[dict] = []
+    conflicts = 0
+    for sym, alerts in by_symbol.items():
+        has_long = any(a.get("direction") != "short" for a in alerts)
+        has_short = any(a.get("direction") == "short" for a in alerts)
+        if not (has_long and has_short):
+            kept.extend(alerts)
+            continue
+        verdict_dir = None
+        for a in alerts:
+            verdict_dir = _book_verdict_direction(a)
+            if verdict_dir is not None:
+                break
+        if verdict_dir is None:
+            kept.extend(alerts)
+            continue
+        conflicts += 1
+        if verdict_dir == "flat":
+            continue
+        kept.extend(
+            a
+            for a in alerts
+            if (a.get("direction") == "short") == (verdict_dir == "short")
+        )
+    return kept, conflicts
+
+
 def diagnostics_reports(
     group: Optional[str],
     timeframe: str,
@@ -361,7 +420,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     def _merge_long_short(long: dict, short: dict) -> dict:
         merged = dict(long)
-        merged["new_alerts"] = long["new_alerts"] + short["new_alerts"]
+        alerts, conflicts = merge_pass_alerts(long["new_alerts"], short["new_alerts"])
+        merged["new_alerts"] = alerts
+        merged["conflicts_resolved"] = conflicts
         merged["candidates"] = long["candidates"] + short["candidates"]
         merged["skipped_dup"] = long["skipped_dup"] + short["skipped_dup"]
         merged["sizing_failed"] = long.get("sizing_failed", 0) + short.get(
@@ -389,6 +450,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "candidates": res["candidates"],
                 "skipped_dup": res["skipped_dup"],
                 "sizing_failed": res.get("sizing_failed", 0),
+                "conflicts_resolved": res.get("conflicts_resolved", 0),
                 "macro": res.get("macro"),
                 "alerts": [
                     {
