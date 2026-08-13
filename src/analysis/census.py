@@ -324,6 +324,38 @@ def _recall_stats(stats: Dict) -> Dict:
     return out
 
 
+def _ratio_dispersion(stats: Dict) -> Optional[Dict]:
+    """Per-market long/short signal-ratio dispersion across symbols.
+
+    Returns None when fewer than 3 symbols have both-side signals (a
+    dispersion claim needs enough per-market ratios to be meaningful).
+    """
+    sig_ratios = []
+    for sym, s in stats["by_symbol"].items():
+        ls, ss = s["long"]["signals"], s["short"]["signals"]
+        if ls and ss:
+            sig_ratios.append((sym, ls / ss))
+    if len(sig_ratios) < 3:
+        return None
+    vals = np.array([r for _, r in sig_ratios], dtype=float)
+    p25, p75 = np.percentile(vals, [25, 75])
+    most = sorted(sig_ratios, key=lambda kv: abs(np.log(kv[1])))[-1]
+    return {
+        "n": len(vals),
+        "median": float(np.median(vals)),
+        "mean": float(vals.mean()),
+        "std": float(vals.std()),
+        "p25": float(p25),
+        "p75": float(p75),
+        "min": float(vals.min()),
+        "min_sym": min(sig_ratios, key=lambda kv: kv[1])[0],
+        "max": float(vals.max()),
+        "max_sym": max(sig_ratios, key=lambda kv: kv[1])[0],
+        "most_skewed": most[1],
+        "most_skewed_sym": most[0],
+    }
+
+
 def print_census(stats: Dict, symbols_shown: int = 6) -> None:
     print("\n" + "=" * 72)
     print("HISTORICAL OPPORTUNITY CENSUS — LONG vs SHORT")
@@ -371,12 +403,33 @@ def print_census(stats: Dict, symbols_shown: int = 6) -> None:
     rows.sort(key=lambda r: -(r[1] + r[2]))
     print(
         f"{'SYMBOL':<8}{'L cand':>8}{'S cand':>8}{'L sig':>6}{'S sig':>6}"
-        f"{'L win':>6}{'S win':>6}"
+        f"{'L win':>6}{'S win':>6}{'ratio':>8}"
     )
     for row in rows[:symbols_shown]:
+        _, lc, sc, ls, ss, lw, sw = row
+        sig_ratio = (ls / ss) if ss else (None if ls == 0 else float("inf"))
+        ratio_txt = "-" if sig_ratio is None else f"{sig_ratio:.2f}"
         print(
-            f"{row[0]:<8}{row[1]:>8,}{row[2]:>8,}{row[3]:>6,}{row[4]:>6,}"
-            f"{row[5]:>6,}{row[6]:>6,}"
+            f"{row[0]:<8}{lc:>8,}{sc:>8,}{ls:>6,}{ss:>6,}"
+            f"{lw:>6,}{sw:>6,}{ratio_txt:>8}"
+        )
+
+    # Per-market ratio dispersion: the universe average can hide wide
+    # symbol-level skew (a handful of markets driving the headline).
+    disp = _ratio_dispersion(stats)
+    if disp:
+        print(
+            "\nPer-market signal-ratio dispersion: "
+            f"n={disp['n']} · median {disp['median']:.2f} · "
+            f"mean {disp['mean']:.2f} · std {disp['std']:.2f} · "
+            f"IQR {disp['p25']:.2f}-{disp['p75']:.2f} · "
+            f"min {disp['min']:.2f} ({disp['min_sym']}) · "
+            f"max {disp['max']:.2f} ({disp['max_sym']})"
+        )
+        print(
+            f"   Most skewed: {disp['most_skewed_sym']} "
+            f"({disp['most_skewed']:.2f}x) - the universe median/mean is "
+            f"NOT per-market neutrality"
         )
 
     if stats.get("failures"):

@@ -21,6 +21,7 @@ import pandas as pd
 from src.analysis.census import (
     _classify_history,
     _realized_r,
+    _ratio_dispersion,
     _uniform_r,
     opportunity_census,
 )
@@ -171,6 +172,45 @@ class TestUniformR(unittest.TestCase):
             expected_win = DEFAULT_TARGET_MULT / DEFAULT_STOP_MULT
             for v in vals[vals > 0]:
                 self.assertAlmostEqual(v, expected_win, places=6)
+
+
+class TestRatioDispersion(unittest.TestCase):
+    def test_computes_dispersion_across_symbols(self):
+        from collections import Counter, defaultdict
+
+        stats = {"by_symbol": defaultdict(lambda: {"long": Counter(), "short": Counter()})}
+        for sym, (ls, ss) in {
+            "A": (10, 1),   # ratio 10.0 (most skewed)
+            "B": (2, 10),   # ratio 0.2
+            "C": (5, 5),    # ratio 1.0
+        }.items():
+            stats["by_symbol"][sym]["long"]["signals"] = ls
+            stats["by_symbol"][sym]["short"]["signals"] = ss
+        disp = _ratio_dispersion(stats)
+        self.assertEqual(disp["n"], 3)
+        self.assertAlmostEqual(disp["median"], 1.0, places=6)
+        self.assertEqual(disp["min_sym"], "B")
+        self.assertEqual(disp["max_sym"], "A")
+        self.assertEqual(disp["most_skewed_sym"], "A")
+
+    def test_requires_three_symbols(self):
+        from collections import Counter, defaultdict
+
+        stats = {"by_symbol": defaultdict(lambda: {"long": Counter(), "short": Counter()})}
+        for sym, (ls, ss) in {"A": (4, 2), "B": (4, 2)}.items():
+            stats["by_symbol"][sym]["long"]["signals"] = ls
+            stats["by_symbol"][sym]["short"]["signals"] = ss
+        self.assertIsNone(_ratio_dispersion(stats))
+
+    def test_skips_symbols_without_both_side_signals(self):
+        from collections import Counter, defaultdict
+
+        stats = {"by_symbol": defaultdict(lambda: {"long": Counter(), "short": Counter()})}
+        for sym, (ls, ss) in {"A": (4, 2), "B": (6, 2), "C": (0, 3)}.items():
+            stats["by_symbol"][sym]["long"]["signals"] = ls
+            stats["by_symbol"][sym]["short"]["signals"] = ss
+        # C has no long signals -> excluded; only A and B remain.
+        self.assertIsNone(_ratio_dispersion(stats))
 
 
 if __name__ == "__main__":

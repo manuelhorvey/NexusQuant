@@ -239,3 +239,15 @@ computing them per-window measured ~181ms/window (O(n²) over a 12-symbol
 universe ~25 min), and the full-frame versions would leak future bars into
 early classification. Documented trade-off, not regressed. +2 tests. 560
 tests OK, 2 skipped.
+
+## 14. Phase 6 addendum: per-market ratio dispersion reporting
+
+The census headline reported only the universe-average long/short ratio,
+which hides wide symbol-level skew (e.g. a few markets can drive the
+average while most are balanced). Added per-symbol ratio to the side-mix
+table and `_ratio_dispersion` (median / mean / std / IQR / min / max /
+most-skewed market over the per-market ratios, shown only when >=3 symbols
+have both-side signals). The 12-symbol run confirms the Phase-1 finding
+quantitatively: median 1.91 vs universe 0.99 - per-market neutrality is the
+exception, not the rule (min 0.36 AUDSEK, max 4.25 AUDDKK). +3 tests. 563
+tests OK, 2 skipped.
