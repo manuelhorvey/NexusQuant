@@ -38,6 +38,29 @@ from src.model.model import (
     predict_series,
 )
 
+
+def _direction_win_prob(sc: Dict) -> Optional[float]:
+    """
+    Direction-winning calibrated probability for a setup classification.
+
+    Picks the probability matching the classifier's direction so a short
+    setup's EV reads from the SHORT model (never the inverted or unrelated
+    long read), falling back to the other side only when the matching model
+    is absent. Explicit None checks - a 0.0 calibrated probability is valid
+    evidence, not "missing". Returns None only when neither side has one.
+    """
+    direction = sc.get("direction")
+    if direction == "short":
+        p = sc.get("prob_short")
+        if p is not None:
+            return p
+        return sc.get("prob_long")
+    p = sc.get("prob_long")
+    if p is not None:
+        return p
+    return sc.get("prob_short")
+
+
 _SETTINGS_CACHE: Optional[dict] = None
 
 
@@ -401,10 +424,12 @@ def generate_full_report(
         # Probability-weighted R:R from the ladders (approximate; prefers
         # calibrated ML when present).
         # Direction-winning probability (explicit None checks - a 0.0
-        # calibrated probability is valid evidence, not "missing").
-        p_win = sc.get("prob_long")
-        if p_win is None:
-            p_win = sc.get("prob_short")
+        # calibrated probability is valid evidence, not "missing"). Picks
+        # the probability matching the classifier's direction so a short
+        # setup's EV reads from the SHORT model (never the inverted or
+        # unrelated long read), falling back to the other side only when
+        # the matching model is absent.
+        p_win = _direction_win_prob(sc)
         # Probability-weighted R:R from the ladders (approximate; prefers
         # calibrated ML when present).
         pw_rr = None

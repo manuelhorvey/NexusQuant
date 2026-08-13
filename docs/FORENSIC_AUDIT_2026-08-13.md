@@ -150,3 +150,44 @@ ML behavior instead of the short model. pytest is not installed.
    universe average.
 6. **Cleanup**: remove the `or` fallthrough, purge registry /tmp entries,
    commit the pending working tree after review.
+
+## 11. Phase 3 addendum: dual-model training parity (2026-08-13)
+
+Audited the training + serve path of the two calibrated models
+(`models/dip_lgbm.joblib` long, `models/rally_lgbm.joblib` short).
+
+**Verified sound:**
+- **Feature parity**: both bundles carry the *identical* 54 `FEATURE_COLUMNS`
+  (list equality). The rally signal is mapped onto the dip feature slots
+  (`_normalize_signal` in `src/model/features.py`) with the direction flag
+  flipped, so one feature builder serves both sides.
+- **Label parity**: `build_labels_short` / `make_meta_labels_short` mirror the
+  long builders with barriers inverted (stop above, target below); `side`
+  flows through `build_dataset` to select rally signal + mirrored labels.
+- **Meta-label default**: both models trained on the actual engine outcome
+  (confirmed setup fill / stop / resistance target), not the generic 1R.
+- **Calibration**: both are isotonic-calibrated on pooled OOS folds; serve
+  time applies `apply_calibrator`.
+- **Serve parity**: `predict_short_series` builds `rally_signal_series` so
+  features match training distribution; `predict_long_short` returns
+  `{prob_long, prob_short, net_bias}` and never fabricates `net_bias` when a
+  side's model is missing.
+- **Consumption parity**: `filter_short_signals` gates on `ml_short_prob`;
+  the opportunity book's short side reads `sc["prob_short"]`; the macro gate
+  uses `gate_short` (all fixed in Phase 2).
+
+**Fix applied (this phase):**
+- `report.py` `sc["ev"]` / `sc["pw_rr"]` always read `prob_long` regardless of
+  the classifier's `direction` — a short setup's EV was computed from the LONG
+  model's probability. The opportunity book's per-side EV was already correct;
+  this only misreported the ranking/plan/print surface. Extracted
+  `_direction_win_prob` (direction-matching prob, 0.0 valid, explicit None
+  fallback) and wired it in. +6 regression tests.
+
+**Residual asymmetry (training-time, not a code defect):**
+- Long model `num_leaves=127` (hyperparameter search run), short model
+  `num_leaves=31` (defaults — trained without `--search`). Short model also
+  has far fewer training samples (n_train 310 vs 853; n_test 686 vs 1606),
+  though its OOS AUC (0.5836) slightly beats the long (0.5775). Retraining the
+  short model with `--search` when more rally data accumulates is recommended,
+  but no pipeline change is required.

@@ -250,5 +250,43 @@ class LiveShortFilterTest(unittest.TestCase):
         self.assertEqual(rr.iloc[0], 2.5)
 
 
+class DirectionWinProbTest(unittest.TestCase):
+    """The setup-classification EV must read from the direction-matching
+    calibrated model (short setups use the SHORT model, never the inverted
+    or unrelated long read), with 0.0 a valid probability and explicit
+    None fallback."""
+
+    def _win_prob(self, sc):
+        from src.analysis.report import _direction_win_prob
+
+        return _direction_win_prob(sc)
+
+    def test_short_direction_uses_short_model(self):
+        p = self._win_prob({"direction": "short", "prob_long": 0.9, "prob_short": 0.2})
+        self.assertEqual(p, 0.2)
+
+    def test_long_direction_uses_long_model(self):
+        p = self._win_prob({"direction": "long", "prob_long": 0.9, "prob_short": 0.2})
+        self.assertEqual(p, 0.9)
+
+    def test_short_direction_zero_prob_is_valid(self):
+        # A calibrated 0.0 on the short side is real evidence, not "missing"
+        # - it must NOT fall through to the long read.
+        p = self._win_prob({"direction": "short", "prob_long": 0.9, "prob_short": 0.0})
+        self.assertEqual(p, 0.0)
+
+    def test_short_direction_falls_back_when_short_absent(self):
+        p = self._win_prob({"direction": "short", "prob_long": 0.9, "prob_short": None})
+        self.assertEqual(p, 0.9)
+
+    def test_no_direction_uses_long_first(self):
+        p = self._win_prob({"direction": "flat", "prob_long": 0.7, "prob_short": None})
+        self.assertEqual(p, 0.7)
+
+    def test_no_probability_returns_none(self):
+        p = self._win_prob({"direction": "short", "prob_long": None, "prob_short": None})
+        self.assertIsNone(p)
+
+
 if __name__ == "__main__":
     unittest.main()
