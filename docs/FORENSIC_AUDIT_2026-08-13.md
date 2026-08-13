@@ -211,3 +211,31 @@ concatenation (graceful).
 Surfaced in the merged result as `conflicts_resolved` and rendered in the
 briefing footer / JSON output. `format_briefing` counts conflicts arbitrated
 to FLAT in the no-alert line. +5 regression tests. 558 tests OK, 2 skipped.
+
+## 13. Phase 5 addendum: uniform outcome validation for all 12 families
+
+Closed the census methodology gap (census.py:74 stripped enrichments; only
+engine-confirmed bars got outcome labels). The 10 non-pullback families
+(breakout / breakdown / retest / reversal / mean-reversion / trend
+continuation) were counted as candidates but never outcome-validated.
+
+**Fix:** added `_uniform_r` — the same triple-barrier 1R geometry the ML
+models train on (`build_labels` / `build_labels_short`: entry = close,
+stop = ∓stop_mult·ATR(14), target = ±target_mult·ATR(14), stop checked
+before target over the next `horizon` bars). It is causal by construction
+and resolves EVERY classified family candidate, so `opportunity_census`
+now reports a per-family uniform win/loss table for all 12 families
+alongside the engine-confirmed deployment-objective stats. The engine
+path (pullback families, real entry/stop/target) is unchanged.
+
+The uniform win payoff is the asymmetric `target_mult / stop_mult`
+(= 0.75/1.25 = 0.6R) — the honest reward of the symmetric geometry, so a
+family must win >62.5% of resolved bars to be net-positive. This is a
+measurement, not a trade recommendation: the deployment geometry (ladder,
+resistance targets) is the actual payoff basis.
+
+Causal enrichments (levels/divergence/patterns) remain OFF in the census:
+computing them per-window measured ~181ms/window (O(n²) over a 12-symbol
+universe ~25 min), and the full-frame versions would leak future bars into
+early classification. Documented trade-off, not regressed. +2 tests. 560
+tests OK, 2 skipped.

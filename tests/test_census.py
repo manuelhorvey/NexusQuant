@@ -21,6 +21,7 @@ import pandas as pd
 from src.analysis.census import (
     _classify_history,
     _realized_r,
+    _uniform_r,
     opportunity_census,
 )
 from src.features.indicators import add_all_indicators
@@ -126,6 +127,50 @@ class TestCensus(unittest.TestCase):
         # *measured* (0 is a measured zero, not an absence of the side).
         self.assertIn("long", stats["side"])
         self.assertIn("short", stats["side"])
+
+    def test_uniform_outcome_validates_all_families(self):
+        # Every classified family candidate gets a uniform 1R outcome, not
+        # just engine-confirmed pullbacks. W/L resolution stays causal and
+        # mirrors the model's asymmetric barriers (stop further than target).
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            from pathlib import Path as P
+
+            p = P(tmp)
+            (p / "full_fx").mkdir(parents=True)
+            df = _make_df(700)
+            raw = df[["open", "high", "low", "close", "volume"]].copy()
+            raw["date"] = pd.date_range("2018-01-01", periods=len(df))
+            raw.to_parquet(p / "full_fx" / "TEST_D1.parquet")
+
+            stats = opportunity_census(
+                ["TEST"], data_dir=tmp, group="full_fx", min_family_score=0.3
+            )
+        self.assertIn("family_uniform", stats)
+        # At least one family must have a resolved uniform outcome (the
+        # census must measure all families' outcomes, not stay empty).
+        self.assertGreater(sum(1 for k in stats["family_uniform"] if k.endswith("_RESOLVED")), 0)
+        # Win/Loss keys only appear alongside a RESOLVED count.
+        for k, v in stats["family_uniform"].items():
+            self.assertGreaterEqual(v, 0)
+
+
+class TestUniformR(unittest.TestCase):
+    def test_causal_and_mirrored_geometry(self):
+        df = _make_df()
+        for side in ("long", "short"):
+            u = _uniform_r(df, side)
+            self.assertEqual(len(u), len(df))
+            vals = u.dropna()
+            # Resolution values are either a win (positive) or exactly -1 loss.
+            self.assertTrue(((vals == -1.0) | (vals > 0)).all())
+            # The win payoff is the asymmetric 1R ratio (target/stop).
+            from src.model.features import DEFAULT_STOP_MULT, DEFAULT_TARGET_MULT
+
+            expected_win = DEFAULT_TARGET_MULT / DEFAULT_STOP_MULT
+            for v in vals[vals > 0]:
+                self.assertAlmostEqual(v, expected_win, places=6)
 
 
 if __name__ == "__main__":

@@ -142,6 +142,66 @@ def _realized_r(sig_frame: pd.DataFrame, df: pd.DataFrame, side: str) -> pd.Seri
     return out
 
 
+def _uniform_r(df: pd.DataFrame, side: str) -> pd.Series:
+    """Symmetric 1R win/loss outcome for EVERY bar, causal by construction.
+
+    This is the same triple-barrier geometry the ML models train on
+    (``build_labels`` / ``build_labels_short`` in ``src/model/features.py``):
+    entry = close, stop = close - stop_mult*ATR(14) (long) / + (short),
+    target = close + target_mult*ATR(14) (long) / - (short). The stop is
+    checked before the target over the next ``horizon`` bars; unresolved
+    rows are NaN.
+
+    Unlike ``_realized_r`` (which only resolves bars the pullback engines
+    CONFIRM), this validates every classified family - so the census can
+    report outcome parity for all 12 families, not just the engine's
+    BUY_DIP / SELL_RALLY pair. Causality: barriers use only the bar's own
+    ATR; resolution reads only forward bars.
+    """
+    from src.model.features import DEFAULT_HORIZON, DEFAULT_STOP_MULT, DEFAULT_TARGET_MULT
+
+    close = df["close"].astype(float)
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    atr = df["atr_14"].astype(float)
+
+    stop = close - DEFAULT_STOP_MULT * atr if side == "long" else close + DEFAULT_STOP_MULT * atr
+    target = (
+        close + DEFAULT_TARGET_MULT * atr
+        if side == "long"
+        else close - DEFAULT_TARGET_MULT * atr
+    )
+
+    out = pd.Series(np.nan, index=df.index)
+    for i in range(len(df) - 1):
+        s, t = stop.iloc[i], target.iloc[i]
+        if s != s or t != t:
+            continue
+        win = loss = False
+        horizon = df.iloc[i + 1 : i + 1 + DEFAULT_HORIZON]
+        for _, bar in horizon.iterrows():
+            hi, lo = float(bar["high"]), float(bar["low"])
+            if side == "long":
+                if lo <= s:
+                    loss = True
+                    break
+                if hi >= t:
+                    win = True
+                    break
+            else:
+                if hi >= s:
+                    loss = True
+                    break
+                if lo <= t:
+                    win = True
+                    break
+        if win:
+            out.iloc[i] = DEFAULT_TARGET_MULT / DEFAULT_STOP_MULT
+        elif loss:
+            out.iloc[i] = -1.0
+    return out
+
+
 def opportunity_census(
     symbols: List[str],
     data_dir: str = "data/raw",
@@ -156,6 +216,7 @@ def opportunity_census(
     stats = {
         "side": {"long": Counter(), "short": Counter()},
         "family": Counter(),
+        "family_uniform": Counter(),
         "by_symbol": defaultdict(lambda: {"long": Counter(), "short": Counter()}),
         "n_symbols": 0,
         "bars": 0,
@@ -187,6 +248,9 @@ def opportunity_census(
             sig_short = rally_signal_series(df)
             r_long = _realized_r(sig_long, df, "long")
             r_short = _realized_r(sig_short, df, "short")
+            # Uniform 1R outcome for EVERY classified bar (all families).
+            u_long = _uniform_r(df, "long")
+            u_short = _uniform_r(df, "short")
 
             for date, row in hist.iterrows():
                 fam = row["setup_family"]
@@ -199,12 +263,24 @@ def opportunity_census(
                 stats["family"][fam] += 1
                 stats["side"][side]["candidates"] += 1
                 stats["by_symbol"][sym][side]["candidates"] += 1
-                # Realized label: a family candidate is "validated" when a
-                # confirmed engine signal fires on the same bar AND the
-                # causal first-touch label wins.
                 i = df.index.get_loc(date)
                 if i is None or i >= len(df):
                     continue
+                # Uniform 1R outcome (all families): resolve EVERY classified
+                # candidate with the symmetric causal geometry so the 10
+                # non-pullback families are validated too, not just
+                # engine-confirmed bars (the engine path below is the
+                # deployment-objective measurement for pullback families).
+                u = u_long.iloc[i] if side == "long" else u_short.iloc[i]
+                if u == u:
+                    stats["family_uniform"][fam + "_RESOLVED"] += 1
+                    if u > 0:
+                        stats["family_uniform"][fam + "_WIN"] += 1
+                    else:
+                        stats["family_uniform"][fam + "_LOSS"] += 1
+                # Realized label: a family candidate is "validated" when a
+                # confirmed engine signal fires on the same bar AND the
+                # causal first-touch label wins.
                 rv = r_long.iloc[i] if side == "long" else r_short.iloc[i]
                 sig = (
                     sig_long["confirmed"] if side == "long" else sig_short["confirmed"]
@@ -267,6 +343,16 @@ def print_census(stats: Dict, symbols_shown: int = 6) -> None:
     print("\nPer-family candidate counts:")
     for fam, n in sorted(stats["family"].items(), key=lambda kv: -kv[1]):
         print(f"  {fam:<28} {n:>6,}")
+
+    print("\nPer-family uniform 1R outcome (all families, causal geometry):")
+    fams = sorted(stats["family"], key=lambda f: -stats["family"][f])
+    print(f"{'FAMILY':<28}{'cand':>8}{'win':>7}{'loss':>7}{'winrate':>9}")
+    for fam in fams:
+        n = stats["family"][fam]
+        wins = stats["family_uniform"].get(fam + "_WIN", 0)
+        losses = stats["family_uniform"].get(fam + "_LOSS", 0)
+        rate = f"{100 * wins / max(wins + losses, 1):.1f}%" if wins + losses else "-"
+        print(f"{fam:<28}{n:>8,}{wins:>7,}{losses:>7,}{rate:>9}")
 
     print("\nPer-symbol side mix (top symbols by total candidates):")
     rows = []
