@@ -39,10 +39,10 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 # Decision thresholds (documented defaults; overridable per call).
-DEFAULT_MIN_EV_R = 0.20       # minimum positive expected value in R
-DEFAULT_MIN_RR = 2.5          # aligns with risk.min_reward_risk
-DEFAULT_MIN_ML_PROB = 0.55    # calibrated-probability floor for EV to count
-DEFAULT_COST_R = 0.05         # round-trip cost assumption in R when no
+DEFAULT_MIN_EV_R = 0.20  # minimum positive expected value in R
+DEFAULT_MIN_RR = 2.5  # aligns with risk.min_reward_risk
+DEFAULT_MIN_ML_PROB = 0.55  # calibrated-probability floor for EV to count
+DEFAULT_COST_R = 0.05  # round-trip cost assumption in R when no
 #                               settings-derived cost is available
 
 
@@ -186,8 +186,11 @@ def _side_opportunity(
     rr_ok = bool(targets.get("min_rr_tp"))
 
     cost_r = roundtrip_cost_r(
-        entry, stop, spread_points=spread_points,
-        slippage_pips=slippage_pips, pip_size=pip_size,
+        entry,
+        stop,
+        spread_points=spread_points,
+        slippage_pips=slippage_pips,
+        pip_size=pip_size,
     )
 
     reasons: List[str] = []
@@ -205,6 +208,12 @@ def _side_opportunity(
         )
     if prob is not None:
         reasons.append(f"calibrated P = {prob:.0%}")
+        if prob < min_ml_prob:
+            # Informational only: the live pass applies the ML floor as a
+            # FILTER; the book's decision variable is expected value.
+            reasons.append(
+                f"below live ML floor {min_ml_prob:.0%} (filter applies at pass level)"
+            )
 
     # Expected value: ONLY from a calibrated probability (never fabricated).
     expected_r: Optional[float] = None
@@ -215,18 +224,17 @@ def _side_opportunity(
         win_rr = ladder_best if (ladder_best or 0) >= 1.0 else rr or 1.0
         expected_r = round(p * win_rr - (1.0 - p) * 1.0 - cost_r, 4)
 
+    # BOOK-LEVEL rejection reasons (decision-relevant gates the EV winner
+    # must pass): evidence bar, calibrated probability availability, EV,
+    # R:R floor, macro. Engine confirmation is NOT a book gate - the
+    # classifier's breakout/breakdown/retest families are exactly what the
+    # engines cannot see - it is reported in ``reasons`` for context.
     rejection: List[str] = []
     if not family_map:
         rejection.append("no setup family cleared the evidence bar")
-    if not engine_confirmed:
-        rejection.append(
-            f"{'dip' if side == 'long' else 'rally'} engine not confirmed"
-        )
     if prob is None:
         rejection.append("no calibrated model probability (EV not computed)")
-    elif prob < min_ml_prob:
-        rejection.append(f"calibrated P {prob:.0%} < {min_ml_prob:.0%} floor")
-    if expected_r is not None and expected_r <= 0:
+    elif expected_r is not None and expected_r <= 0:
         rejection.append(f"EV {expected_r:+.2f}R <= 0 after costs")
     if rr_ok is False and targets.get("targets"):
         rejection.append(
@@ -235,7 +243,6 @@ def _side_opportunity(
         )
     if macro.get("allowed") is False:
         rejection.append(f"macro gate BLOCKED ({macro.get('reason')})")
-
     return Opportunity(
         symbol=symbol,
         direction=side,
@@ -286,13 +293,21 @@ def build_opportunity_book(
     """
     symbol = str(report.get("symbol", "?"))
     long_opp = _side_opportunity(
-        report, "long", min_rr=min_rr, min_ml_prob=min_ml_prob,
-        spread_points=spread_points, slippage_pips=slippage_pips,
+        report,
+        "long",
+        min_rr=min_rr,
+        min_ml_prob=min_ml_prob,
+        spread_points=spread_points,
+        slippage_pips=slippage_pips,
         pip_size=pip_size,
     )
     short_opp = _side_opportunity(
-        report, "short", min_rr=min_rr, min_ml_prob=min_ml_prob,
-        spread_points=spread_points, slippage_pips=slippage_pips,
+        report,
+        "short",
+        min_rr=min_rr,
+        min_ml_prob=min_ml_prob,
+        spread_points=spread_points,
+        slippage_pips=slippage_pips,
         pip_size=pip_size,
     )
 
@@ -303,8 +318,11 @@ def build_opportunity_book(
     # Path 1: no calibrated probability on either side -> engine-confirmed
     # rule path (both existing engines already enforce structure gates).
     if ev_l is None and ev_s is None:
-        confirmed = [o for o in (long_opp, short_opp) if o.reasons
-                     and any("CONFIRMED" in r for r in o.reasons)]
+        confirmed = [
+            o
+            for o in (long_opp, short_opp)
+            if o.reasons and any("CONFIRMED" in r for r in o.reasons)
+        ]
         if confirmed:
             chosen = confirmed[0]
             chosen.taken = True
@@ -329,9 +347,7 @@ def build_opportunity_book(
         return _book(symbol, long_opp, short_opp, verdict)
 
     # Path 2: EV-aware decision (at least one calibrated side).
-    if ev_l is not None and ev_l > DEFAULT_MIN_EV_R and (
-        ev_s is None or ev_l >= ev_s
-    ):
+    if ev_l is not None and ev_l > DEFAULT_MIN_EV_R and (ev_s is None or ev_l >= ev_s):
         chosen, other = long_opp, short_opp
     elif ev_s is not None and ev_s > DEFAULT_MIN_EV_R:
         chosen, other = short_opp, long_opp
@@ -351,20 +367,28 @@ def build_opportunity_book(
         }
         return _book(symbol, long_opp, short_opp, verdict)
 
-    # The EV winner must still clear the hard floors (macro + R:R).
+    # The EV winner must still clear the book's hard floors (R:R + macro).
     if other is not None and (other.expected_r or 0) > (chosen.expected_r or 0):
         chosen, other = other, chosen
-    macro_blocked = any("BLOCKED" in r for r in chosen.rejection_reasons)
-    if macro_blocked:
+    hard_blocked = [
+        r for r in chosen.rejection_reasons if "floor" in r or "BLOCKED" in r
+    ]
+    if hard_blocked:
         verdict = {
             "direction": "flat",
             "status": "FLAT",
             "expected_r": chosen.expected_r,
-            "reason": f"EV winner {chosen.direction.upper()} is macro-blocked",
+            "reason": (
+                f"EV winner {chosen.direction.upper()} fails hard gate: "
+                + "; ".join(hard_blocked)
+            ),
         }
         return _book(symbol, long_opp, short_opp, verdict)
 
+    # The winner passed every book gate - clear its (now inapplicable)
+    # rejection reasons so the output is never self-contradictory.
     chosen.taken = True
+    chosen.rejection_reasons = []
     verdict_reasons.append(
         f"EV path: {chosen.direction.upper()} "
         f"EV {chosen.expected_r:+.2f}R > "
@@ -404,9 +428,15 @@ def format_opportunity_book(book: Dict) -> str:
             f"  setup      : {fam or '-'} "
             f"(score {opp.get('family_score') if opp.get('family_score') is not None else '-'})"
         )
-        lines.append(f"  probability: {'-' if opp.get('probability') is None else f'{opp['probability']:.0%}'}")
-        lines.append(f"  EV         : {'-' if opp.get('expected_r') is None else f'{opp['expected_r']:+.2f}R'}")
-        lines.append(f"  R:R        : {'-' if opp.get('rr') is None else f'{opp['rr']:.2f}'} · cost {opp['cost_r']:.3f}R")
+        lines.append(
+            f"  probability: {'-' if opp.get('probability') is None else f'{opp['probability']:.0%}'}"
+        )
+        lines.append(
+            f"  EV         : {'-' if opp.get('expected_r') is None else f'{opp['expected_r']:+.2f}R'}"
+        )
+        lines.append(
+            f"  R:R        : {'-' if opp.get('rr') is None else f'{opp['rr']:.2f}'} · cost {opp['cost_r']:.3f}R"
+        )
         if opp.get("entry_zone"):
             lines.append(
                 f"  entry      : {opp['entry_zone'][0]:,.5f} · stop "

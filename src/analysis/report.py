@@ -382,6 +382,13 @@ def generate_full_report(
         )
         # Probability-weighted R:R from the ladders (approximate; prefers
         # calibrated ML when present).
+        # Direction-winning probability (explicit None checks - a 0.0
+        # calibrated probability is valid evidence, not "missing").
+        p_win = sc.get("prob_long")
+        if p_win is None:
+            p_win = sc.get("prob_short")
+        # Probability-weighted R:R from the ladders (approximate; prefers
+        # calibrated ML when present).
         pw_rr = None
         try:
             from src.features.setups import probability_weighted_rr
@@ -389,16 +396,38 @@ def generate_full_report(
             ladder = (report.get("targets") or {}).get("targets") or []
             if not ladder:
                 ladder = (report.get("short_targets") or {}).get("targets") or []
-            p_win = sc.get("prob_long") or sc.get("prob_short")
             pw_rr = probability_weighted_rr(ladder, p_win)
         except Exception:
             pw_rr = None
         sc["pw_rr"] = pw_rr
         # EV in R units (None when no calibrated probability - never fabricated).
-        sc["ev"] = expected_value(
-            sc.get("prob_long") or sc.get("prob_short"), avg_win_r=2.5
-        )
+        sc["ev"] = expected_value(p_win, avg_win_r=2.5)
         report["setup_classification"] = sc
+
+        # Unified Opportunity Book + EV-aware LONG/SHORT/FLAT decision
+        # (campaign spec #9/#18/#46): per-side opportunities with explicit
+        # rejection reasons and a verdict driven by expected value when
+        # calibrated probabilities exist. Cost model: settings slippage
+        # (pips) converted to R via the stop distance; JPY pairs use 0.01
+        # pips, everything else 0.0001.
+        try:
+            from src.analysis.opportunity import build_opportunity_book
+
+            slip = None
+            try:
+                import yaml
+
+                with open("config/settings.yaml") as _f:
+                    _cfg = yaml.safe_load(_f) or {}
+                slip = (_cfg.get("backtest") or {}).get("slippage_pips")
+            except Exception:
+                slip = None
+            pip = 0.01 if symbol.upper().endswith("JPY") else 0.0001
+            report["opportunity_book"] = build_opportunity_book(
+                report, slippage_pips=slip, pip_size=pip
+            )
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -707,7 +736,9 @@ def print_report(report: Dict[str, Any]) -> None:
     if ob:
         print("\n11e. OPPORTUNITY BOOK (unified LONG/SHORT/FLAT decision)")
         v = ob.get("verdict") or {}
-        print(f"   VERDICT: {str(v.get('direction', '-')).upper()} ({v.get('status', '-')})")
+        print(
+            f"   VERDICT: {str(v.get('direction', '-')).upper()} ({v.get('status', '-')})"
+        )
         if v.get("expected_r") is not None:
             print(f"   Expected EV: {v['expected_r']:+.3f}R")
         if v.get("reason"):
