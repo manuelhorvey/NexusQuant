@@ -485,6 +485,28 @@ class TestModelRegistry(unittest.TestCase):
             self.assertEqual(len(recs), 1)
             self.assertEqual(recs[0]["auc_oos"], 0.51)
 
+    def test_prune_tmp_entries(self):
+        from src.model.registry import all_entries, prune_tmp_entries, record
+
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = f"{tmp}/registry.json"
+            record("/tmp/tmpabc/m.joblib", {"auc_oos": 0.4}, registry_path=reg)
+            record("/tmp/tmpdef/m.joblib", {"auc_oos": 0.5}, registry_path=reg)
+            record("models/real.joblib", {"auc_oos": 0.6}, registry_path=reg)
+            removed = prune_tmp_entries(reg)
+            self.assertEqual(removed, 2)
+            remaining = all_entries(reg)
+            self.assertEqual(len(remaining), 1)
+            self.assertEqual(remaining[0]["model"], "models/real.joblib")
+
+    def test_prune_tmp_noop_when_clean(self):
+        from src.model.registry import prune_tmp_entries, record
+
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = f"{tmp}/registry.json"
+            record("models/real.joblib", {"auc_oos": 0.6}, registry_path=reg)
+            self.assertEqual(prune_tmp_entries(reg), 0)
+
 
 class TestSignalExpiry(unittest.TestCase):
     """P2: dedup state must expire so a stale setup becomes re-eligible."""

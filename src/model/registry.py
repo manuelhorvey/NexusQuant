@@ -53,6 +53,32 @@ def entries_for(model_path: str, registry_path: str = REGISTRY_PATH) -> List[Dic
     return [e for e in all_entries(registry_path) if e.get("model") == str(model_path)]
 
 
+def prune_tmp_entries(registry_path: str = REGISTRY_PATH) -> int:
+    """Drop registry records whose model path lives under /tmp.
+
+    Test runs save models to temp dirs (``save_model`` is hooked into the
+    registry), so the ledger fills with throwaway paths that pollute the
+    governance trail. This removes them and rewrites the ledger atomically;
+    real model records are never touched. Returns the number removed.
+    """
+    entries = all_entries(registry_path)
+    kept = [e for e in entries if "/tmp/" not in str(e.get("model", ""))]
+    removed = len(entries) - len(kept)
+    if removed == 0:
+        return 0
+    p = Path(registry_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(kept, fh, indent=2)
+        os.replace(tmp, p)  # atomic: no partial/corrupt ledger
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return removed
+
+
 def latest(model_path: str, registry_path: str = REGISTRY_PATH) -> Optional[Dict]:
     """The most recent registry record for a model path, or None."""
     recs = entries_for(model_path, registry_path)
@@ -104,4 +130,10 @@ def record(
 
 
 if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--prune-tmp":
+        n = prune_tmp_entries()
+        print(f"pruned {n} /tmp registry entries")
+        raise SystemExit(0)
     print("NexusQuant Model Registry module ready.")

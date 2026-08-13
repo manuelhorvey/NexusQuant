@@ -251,3 +251,20 @@ have both-side signals). The 12-symbol run confirms the Phase-1 finding
 quantitatively: median 1.91 vs universe 0.99 - per-market neutrality is the
 exception, not the rule (min 0.36 AUDSEK, max 4.25 AUDDKK). +3 tests. 563
 tests OK, 2 skipped.
+
+## 15. Phase 7 addendum: registry hygiene + fallthrough verification
+
+Phase-1 directive #6 ("cleanup: remove the `or` fallthrough, purge registry
+/tmp entries"). Verified and closed:
+
+- **`or` fallthrough**: confirmed already fixed in Phase 2 - `classify_setup`
+  uses explicit `is None` checks (setups.py:598-603), so a legitimate 0.0
+  calibrated probability survives and only a true `None` falls back to the
+  legacy `prob` key. Verified empirically.
+- **Registry pollution**: `models/registry.json` held 137 entries, 136 of
+  them `/tmp/tmp*/m.joblib` test artifacts, plus the real rally model - and
+  the real dip model was never recorded. Added `prune_tmp_entries` (atomic
+  rewrite, drops only `/tmp/` records, `--prune-tmp` CLI) and recorded the
+  dip model with its metadata. Registry now holds exactly the 2 deployed
+  models: `dip_lgbm` (0.5775) and `rally_lgbm` (0.5836). +2 tests. 565
+  tests OK, 2 skipped.
