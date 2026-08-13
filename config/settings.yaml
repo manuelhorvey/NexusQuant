@@ -10,6 +10,12 @@ data:
   processed_path: data/processed
   default_symbol: XAUUSD
   default_timeframe: D1
+  # Freshness: how old (calendar days) a local bar file may be before it is
+  # flagged stale. Absorbs weekends (Fri->Mon = 3d) + a day of slack.
+  max_stale_days:
+    D1: 4
+    H4: 2
+    H1: 2
 
 features:
   ma_periods: [20, 50, 100, 200]
@@ -37,3 +43,32 @@ backtest:
   initial_capital: 100000
   commission_per_lot: 7.0         # Example
   slippage_pips: 0.5
+
+live:
+  watchlist:
+    group: full_fx                # default scan group
+    timeframe: D1                 # or H4 / H1
+    symbols: null                 # optional explicit watchlist override
+  filters:
+    min_dip_score: 5              # 0-8, only confirmed setups alerted
+    min_ml_prob: null             # e.g. 55 -> require ML bullish prob >= 55%
+    min_rr: null                  # reward:risk floor on the ladder's best
+                                  # achievable R:R (scaling out TP1->TP3);
+                                  # falls back to risk.min_reward_risk (2.5)
+    require_macro_pass: true      # skip setups the macro gate blocks
+  risk:
+    equity: 250000
+    risk_per_trade: 0.01
+  channels:
+    console: true                 # always useful (cron + logs)
+    file: true
+    log_file: logs/live.log
+    discord: false                # set NEXUS_DISCORD_WEBHOOK + flip to true
+    discord_webhook: ""           # or put the URL here (env var preferred)
+                                  # WARNING: this file is committed to git -
+                                  # use the env var to keep the URL secret
+    telegram: false               # set NEXUS_TELEGRAM_BOT_TOKEN +
+                                  # NEXUS_TELEGRAM_CHAT_ID + flip to true
+    telegram_bot_token: ""        # or put the token here (env var preferred)
+    telegram_chat_id: ""          # or put the chat id here (env var preferred)
+  state_file: data/live/alerts.json

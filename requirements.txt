@@ -3,7 +3,6 @@ numpy>=1.24.0
 polars>=0.20.0
 pyarrow>=14.0.0
 ta>=0.11.0
-pandas-ta>=0.3.14b
 scikit-learn>=1.3.0
 lightgbm>=4.0.0
 xgboost>=2.0.0
@@ -14,7 +13,24 @@ streamlit>=1.30.0
 pyyaml>=6.0
 tqdm>=4.66.0
 joblib>=1.3.0
-vectorbt>=0.26.0
-metaTrader5>=5.0.45          # Optional - for live MT5 connection
 jupyter>=1.0.0
 ipykernel>=6.0.0
+rpyc>=5.0.0               # MT5 bridge client (Wine rpyc server on port 8001)
+hmmlearn>=0.3.0           # 4-state Gaussian HMM regime (src/features/regime.py)
+yfinance>=0.2.36          # equity fundamentals provider (src/equity/data_provider.py)
+
+# --- Dev / quality (lint + format, see ruff.toml) ---
+ruff>=0.5.0
+
+# --- API / infrastructure (FastAPI service + Postgres persistence) ---
+fastapi>=0.110.0
+uvicorn>=0.30.0
+sqlalchemy>=2.0.0
+psycopg[binary]>=3.1.0    # Postgres driver (binary wheels, no local libpq)
+httpx>=0.27.0             # FastAPI TestClient (tests)
+pydantic>=2.0.0
+
+# --- Python 3.14 incompatible (no wheels yet) — uncomment when supported ---
+# vectorbt>=0.26.0            # needs numba (<3.14)
+# pandas-ta>=0.3.14b          # needs numba (<3.14)
+# metaTrader5>=5.0.45         # Optional - for live MT5 connection (no Linux/3.14 wheels)

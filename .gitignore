@@ -53,8 +53,13 @@ Thumbs.db
 # regenerated, not versioned. Only the directory skeletons (.gitkeep) are kept.
 data/raw/*
 !data/raw/.gitkeep
+data/archive/
 data/processed/
 data/external/
+# Generated watchlist report dumps (scripts/run_watchlist.py).
+data/reports/
+# Local vendor fundamentals CSVs (equity Value/Quality factors).
+data/fundamentals/
 
 # ---- Logs & caches ----
 logs/
@@ -63,6 +68,14 @@ logs/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# ---- Live signals ----
+# Dedup state (which setups were already alerted) - regenerable.
+data/live/
+
+# ---- Local API persistence ----
+# SQLite fallback database (used when NEXUS_DATABASE_URL/Postgres is absent).
+data/db/
 
 # ---- Testing / coverage ----
 htmlcov/

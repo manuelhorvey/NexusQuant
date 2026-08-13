@@ -1,0 +1,16 @@
+# NexusQuant Streamlit theme — dark institutional look.
+
+[theme]
+base = "dark"
+primaryColor = "#F0B90B"          # gold accent
+backgroundColor = "#0D1117"
+secondaryBackgroundColor = "#161B22"
+textColor = "#E6EDF3"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false
+
+[server]
+# Raise the default so wide Plotly charts render cleanly.
+maxUploadSize = 20

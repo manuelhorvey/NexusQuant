@@ -1,0 +1,21 @@
+# Ruff configuration for NexusQuant.
+#
+# Both commands must pass before merging:
+#   ruff check
+#   ruff format --check
+#
+# The lint set covers what the codebase is verified clean against:
+#   E4/E7/E9  - pycodestyle errors (import placement, semicolons, ...)
+#   F         - pyflakes (undefined names, unused imports/vars, ...)
+#   B         - flake8-bugbear (exception chaining, zip strictness, ...)
+
+line-length = 88
+
+exclude = ["venv", ".venv", "__pycache__"]
+
+[lint]
+select = ["E4", "E7", "E9", "F", "B"]
+# I001 (import sorting) is deliberately NOT enabled: several modules rely
+# on ``sys.path.append(...)`` running before project imports, and isort
+# would reorder those imports above the path setup. Do not enable I001
+# without a known-first-party layout that preserves that ordering.
