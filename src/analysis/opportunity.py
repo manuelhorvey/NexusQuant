@@ -22,15 +22,27 @@ Key properties (campaign acceptance criteria):
 * **Direction is explicit** - an ``Opportunity`` always carries
   ``direction`` in {long, short}; FLAT is the absence of an acceptable
   opportunity, never a forced third choice.
-* **EV decides, not R:R alone** - ``expected_r`` is the decision variable;
-  R:R is reported but a 3R setup with a 5% hit probability is correctly
-  rejected (spec #17/#18).
+* **Target-level EV decides, not ranking EV** - Stage-2/3/10: ``ranking
+  EV`` (P x ladder-best R:R) materially overstates the economics the TP
+  ladder actually delivers. When the empirical first-touch TP distribution
+  exists, ``ev_target_level`` (cost-adjusted target-level EV, computed
+  from the ACTUAL position allocation across TP1/TP2/TP3) is the decision
+  variable; ranking EV is reported alongside as the comparison it is.
+* **Allocation-aware economics** - ``expected_r_alloc`` prices the real
+  partial-exit plan (1/3 at TP1 + 1/3 at TP2 + 1/3 at TP3) instead of
+  assuming the full position reaches the ladder best (spec #10/Stage-10).
 * **No fake probabilities** - when no calibrated model probability exists
   for a side, that side's EV is ``None`` and the decision engine falls back
   to the engine-confirmed path (never invents a probability, spec #15/#16).
+* **Family validation status is enforced** - every family carries a
+  research status (PRODUCTION-VALIDATED / PROMISING-SHADOW-ONLY /
+  UNVALIDATED / FALSIFIED). A FALSIFIED family (e.g. SHORT_REVERSAL,
+  Stage-6) is hard-rejected and can never carry a production trade;
+  UNVALIDATED families compete but are flagged SHADOW-ONLY in the verdict
+  (Stage-10 live/research separation).
 * **Every rejection is explainable** - each opportunity carries a
   ``rejection_reasons`` list (ML below threshold / EV negative / R:R below
-  floor / macro blocked / engine unconfirmed), spec #25.
+  floor / macro blocked / engine unconfirmed / family falsified), spec #25.
 """
 
 from __future__ import annotations
@@ -44,6 +56,64 @@ DEFAULT_MIN_RR = 2.5  # aligns with risk.min_reward_risk
 DEFAULT_MIN_ML_PROB = 0.55  # calibrated-probability floor for EV to count
 DEFAULT_COST_R = 0.05  # round-trip cost assumption in R when no
 #                               settings-derived cost is available
+
+# Partial-exit allocation for the ladder (spec #11 scaling-out plan):
+# 1/3 at TP1, 1/3 at TP2, 1/3 at TP3. The allocation-aware expected R
+# prices THIS plan - not the "full position at the ladder best" fiction.
+ALLOCATION = (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)
+
+# ---------------------------------------------------------------------------
+# Family validation statuses (Stage-10 live/research separation, spec #13)
+#
+# Status is a RESEARCH verdict on the family's hypothesis, carried into the
+# live book so the architecture never silently promotes a family whose
+# evidence is absent or falsified. Source of truth:
+#   - LONG_REVERSAL        : Stage-9 B. PROMISING BUT INSUFFICIENT EVIDENCE
+#                            (frozen 28-symbol universe, fresh window UNRESOLVED)
+#   - SHORT_REVERSAL       : Stage-6 FALSIFIED (perm p=0.38, shuffled timing
+#                            == signal, untouched -0.77R)
+#   - LONG_TREND_CONT / BUY_DIP / BREAKOUT / BREAKOUT_RETEST / MEAN_REVERSION,
+#     SHORT_TREND_CONT / SELL_RALLY / BREAKDOWN / BREAKDOWN_RETEST /
+#     MEAN_REVERSION      : no independent OOS evidence at target level
+#                            (Stage-3 attribution: target-level EV ~ 0 after
+#                            costs on both sides) -> UNVALIDATED
+#   - The frozen Stage-9 LONG reversal trigger (k=3 of RSI30/drop5/streak5n)
+#     is NOT wired into production; when it is, it must enter as its own
+#     family with this same status registry, never as a side-channel.
+# ---------------------------------------------------------------------------
+
+PRODUCTION_VALIDATED = "PRODUCTION-VALIDATED"
+PROMISING_SHADOW_ONLY = "PROMISING-SHADOW-ONLY"
+UNVALIDATED = "UNVALIDATED"
+FALSIFIED = "FALSIFIED"
+
+FAMILY_STATUS: Dict[str, str] = {
+    # LONG side
+    "LONG_REVERSAL": PROMISING_SHADOW_ONLY,
+    "LONG_TREND_CONTINUATION": UNVALIDATED,
+    "LONG_BUY_DIP": UNVALIDATED,
+    "LONG_BREAKOUT": UNVALIDATED,
+    "LONG_BREAKOUT_RETEST": UNVALIDATED,
+    "LONG_MEAN_REVERSION": UNVALIDATED,
+    # SHORT side
+    "SHORT_REVERSAL": FALSIFIED,
+    "SHORT_TREND_CONTINUATION": UNVALIDATED,
+    "SHORT_SELL_RALLY": UNVALIDATED,
+    "SHORT_BREAKDOWN": UNVALIDATED,
+    "SHORT_BREAKDOWN_RETEST": UNVALIDATED,
+    "SHORT_MEAN_REVERSION": UNVALIDATED,
+}
+
+
+# Families with NO validated long-horizon evidence at all: a candidate in
+# these can be *discovered* (the architecture must see both sides), but the
+# final verdict is capped at SHADOW-ONLY until independent evidence accrues.
+def family_status(family: Optional[str]) -> str:
+    """Validation status for a setup family (default UNVALIDATED)."""
+    if not family:
+        return UNVALIDATED
+    return FAMILY_STATUS.get(str(family), UNVALIDATED)
+
 
 # An entry within this fraction of a daily ATR of the last close is an
 # IMMEDIATE (market) order - the trigger is at price now. Beyond it the
@@ -70,6 +140,9 @@ class Opportunity:
     cost_r: float
     confidence: Optional[float]
     ev_target_level: Optional[float] = None  # honest payoff-distribution EV
+    expected_r_alloc: Optional[float] = None  # allocation-aware expected R
+    cost_break_even: Optional[float] = None  # cost at which alloc EV = 0
+    validation_status: str = UNVALIDATED  # family research status
     entry_type: str = "limit"  # "market" when the entry is at/near the close
     reasons: List[str] = field(default_factory=list)
     rejection_reasons: List[str] = field(default_factory=list)
@@ -94,6 +167,9 @@ class Opportunity:
             "probability": self.probability,
             "expected_r": self.expected_r,
             "ev_target_level": self.ev_target_level,
+            "expected_r_alloc": self.expected_r_alloc,
+            "cost_break_even": self.cost_break_even,
+            "validation_status": self.validation_status,
             "cost_r": self.cost_r,
             "confidence": self.confidence,
             "reasons": self.reasons,
@@ -151,6 +227,81 @@ def target_level_ev(
         return None
     ev = p_tp1 * rungs[0] + p_tp2 * rungs[1] + p_tp3 * rungs[2] - p_sl * 1.0 - cost_r
     return round(float(ev), 4)
+
+
+def allocation_weighted_ev(
+    p_tp1: Optional[float],
+    p_tp2: Optional[float],
+    p_tp3: Optional[float],
+    p_sl: Optional[float],
+    rungs: tuple = (1.0, 2.0, 3.0),
+    alloc: tuple = ALLOCATION,
+    cost_r: float = 0.0,
+) -> Optional[float]:
+    """Allocation-aware expected R for the real scaling-out plan (Stage-10).
+
+    The ladder's headline 3R is the payoff if the FULL position rides to
+    TP3. The actual spec #11 plan scales out 1/3 at TP1, 1/3 at TP2, 1/3
+    at TP3 - so the expected portfolio-level R is
+
+        P(tp1) * (a1*r1)
+      + P(tp2) * (a1*r1 + a2*r2)
+      + P(tp3) * (a1*r1 + a2*r2 + a3*r3)
+      - P(sl)  * 1.0
+      - cost_r
+
+    i.e. a TP2 first-touch already banked the TP1 third at r1 and the TP2
+    third at r2; only the residual third is still riding to r3. This is the
+    expected R the trade ACTUALLY pays under the stated allocation - the
+    honest number the ladder-best headline hides. P(time exit) contributes
+    0 payoff (positions exit at the horizon close, ~breakeven before
+    costs); when the residual never reaches TP3 it is conservatively
+    counted at 0.
+
+    Returns None when the distribution is missing or invalid (same
+    validity rules as ``target_level_ev`` - never a fabricated EV).
+    """
+    if any(p is None for p in (p_tp1, p_tp2, p_tp3, p_sl)):
+        return None
+    total = p_tp1 + p_tp2 + p_tp3 + p_sl
+    if total <= 0 or total > 1.0 + 1e-3:
+        return None
+    a1, a2, a3 = alloc
+    ev = (
+        p_tp1 * (a1 * rungs[0])
+        + p_tp2 * (a1 * rungs[0] + a2 * rungs[1])
+        + p_tp3 * (a1 * rungs[0] + a2 * rungs[1] + a3 * rungs[2])
+        - p_sl * 1.0
+        - cost_r
+    )
+    return round(float(ev), 4)
+
+
+def cost_break_even_r(
+    p_tp1: Optional[float],
+    p_tp2: Optional[float],
+    p_tp3: Optional[float],
+    p_sl: Optional[float],
+    rungs: tuple = (1.0, 2.0, 3.0),
+    alloc: tuple = ALLOCATION,
+) -> Optional[float]:
+    """The round-trip cost (in R) at which the allocation-aware expected R
+    becomes zero - the economic break-even. None when no valid
+    distribution. A trade whose realistic cost exceeds this has no edge
+    (Stage-10: reject trades whose edge disappears under realistic costs)."""
+    if any(p is None for p in (p_tp1, p_tp2, p_tp3, p_sl)):
+        return None
+    total = p_tp1 + p_tp2 + p_tp3 + p_sl
+    if total <= 0 or total > 1.0 + 1e-3:
+        return None
+    a1, a2, a3 = alloc
+    gross = (
+        p_tp1 * (a1 * rungs[0])
+        + p_tp2 * (a1 * rungs[0] + a2 * rungs[1])
+        + p_tp3 * (a1 * rungs[0] + a2 * rungs[1] + a3 * rungs[2])
+        - p_sl * 1.0
+    )
+    return round(float(gross), 4)
 
 
 def roundtrip_cost_r(
@@ -310,27 +461,41 @@ def _side_opportunity(
                 f"below live ML floor {min_ml_prob:.0%} (filter applies at pass level)"
             )
 
-    # Expected value: ONLY from a calibrated probability AND a real payoff
-    # basis (never fabricated). When no target ladder and no achieved R:R
-    # exist, EV is left None - assuming a 1.0R payoff would be a silent
-    # fabrication against the campaign's own "no fake EV" principle, and
-    # conservative FLAT is the honest behavior.
+    # ------------------------------------------------------------------
+    # Expected value - Stage-2/10 correction: the DECISION variable is the
+    # cost-adjusted TARGET-LEVEL EV (from the empirical first-touch TP
+    # distribution and the ACTUAL scaling-out allocation), not the ranking
+    # EV (P x ladder-best) which Stage-2/3 showed materially overstates
+    # the economics the ladder delivers.
     #
-    # Stage-2 (spec #4): when the empirical target-level distribution is
-    # supplied (tp_probs from the census), compute the honest payoff-
-    # distribution EV - P(TP1)*R1 + P(TP2)*R2 + P(TP3)*R3 - P(SL) - cost.
-    # This is reported as ``ev_target_level`` NEXT TO the ranking EV (the
-    # directional-probability x ladder-best approximation) so both are
-    # visible: the census shows the target-level EV is ~0 after costs,
-    # which the ranking EV does not reveal. The decision keeps using the
-    # ranking EV until the TP table is symbol-specific and the models are
-    # recalibrated (documented in the Stage-2 report).
-    expected_r: Optional[float] = None
-    ev_target_level: Optional[float] = None
+    # Only a calibrated probability AND a real payoff basis count (never
+    # fabricated). When no target ladder and no achieved R:R exist, EV is
+    # left None - assuming a 1.0R payoff would be a silent fabrication
+    # against the campaign's own "no fake EV" principle, and conservative
+    # FLAT is the honest behavior.
+    #
+    # tp_probs is the per-FAMILY empirical distribution when available
+    # (census ``families`` table - the Stage-10 requirement: a candidate's
+    # EV uses its OWN family's first-touch table, never the pooled one),
+    # falling back to the pooled per-side table. Both are reported; the
+    # allocation-aware ``expected_r_alloc`` is the honest economics of the
+    # spec #11 scaling-out plan (1/3 at TP1 + 1/3 at TP2 + 1/3 at TP3).
+    expected_r: Optional[float] = None  # ranking EV (comparison only)
+    ev_target_level: Optional[float] = None  # decision EV (whole-ladder)
+    expected_r_alloc: Optional[float] = None  # decision EV (allocation-aware)
+    cost_break_even: Optional[float] = None
     payoff_basis: Optional[float] = None
     if prob is not None:
         p = float(prob)
-        if tp_probs is not None:
+        # Family-specific TP table first (Stage-10), else the pooled side.
+        fam_tp = None
+        if family and isinstance(tp_probs, dict):
+            fam_tp = tp_probs.get("families", {}).get(family)
+        side_tp = None
+        if isinstance(tp_probs, dict):
+            side_tp = tp_probs.get("side", {}).get(side) or tp_probs.get(side)
+        dist = fam_tp or side_tp
+        if dist is not None:
             # Real ladder rungs (TP1 < TP2 < TP3 R:R multiples); a missing
             # rung contributes 0 payoff. The census table's TP_k maps to
             # the ladder's k-th rung.
@@ -341,16 +506,34 @@ def _side_opportunity(
             )
             while len(ladder_rrs) < 3:
                 ladder_rrs.append(0.0)
+            rungs = tuple(ladder_rrs[:3])
             ev_target_level = target_level_ev(
-                tp_probs.get("tp1"),
-                tp_probs.get("tp2"),
-                tp_probs.get("tp3"),
-                tp_probs.get("sl"),
-                rungs=tuple(ladder_rrs[:3]),
+                dist.get("tp1"),
+                dist.get("tp2"),
+                dist.get("tp3"),
+                dist.get("sl"),
+                rungs=rungs,
                 cost_r=cost_r,
             )
+            expected_r_alloc = allocation_weighted_ev(
+                dist.get("tp1"),
+                dist.get("tp2"),
+                dist.get("tp3"),
+                dist.get("sl"),
+                rungs=rungs,
+                cost_r=cost_r,
+            )
+            cost_break_even = cost_break_even_r(
+                dist.get("tp1"),
+                dist.get("tp2"),
+                dist.get("tp3"),
+                dist.get("sl"),
+                rungs=rungs,
+            )
         # Ranking EV: conservative payoff (ladder best R:R when it clears
-        # 1R, else the achieved RR). Only computed when one exists.
+        # 1R, else the achieved RR). Reported for comparison - Stage-2
+        # showed it can overstate target-level EV by ~20x (e.g. +2.18R
+        # ranking vs -0.11R target-level on the 2026-08-14 GBPUSD long).
         if ladder_best is not None and ladder_best >= 1.0:
             payoff_basis = ladder_best
         elif rr is not None:
@@ -360,12 +543,22 @@ def _side_opportunity(
 
     # BOOK-LEVEL rejection reasons (decision-relevant gates the EV winner
     # must pass): evidence bar, calibrated probability availability, EV,
-    # R:R floor, macro. Engine confirmation is NOT a book gate - the
-    # classifier's breakout/breakdown/retest families are exactly what the
-    # engines cannot see - it is reported in ``reasons`` for context.
+    # R:R floor, macro, family validation. Engine confirmation is NOT a
+    # book gate - the classifier's breakout/breakdown/retest families are
+    # exactly what the engines cannot see - it is reported in ``reasons``
+    # for context.
     rejection: List[str] = []
     if not family_map:
         rejection.append("no setup family cleared the evidence bar")
+    # Stage-10 (spec #13): a FALSIFIED family must never carry a production
+    # trade - the architecture may still *discover* the opportunity (both
+    # sides visible), but the verdict caps it at FLAT.
+    status = family_status(family)
+    if status == FALSIFIED:
+        rejection.append(
+            f"family {family} is FALSIFIED (research: hypothesis rejected) - "
+            "cannot trade this side"
+        )
     if prob is None:
         rejection.append("no calibrated model probability (EV not computed)")
     elif payoff_basis is None:
@@ -395,6 +588,9 @@ def _side_opportunity(
         probability=prob,
         expected_r=expected_r,
         ev_target_level=ev_target_level,
+        expected_r_alloc=expected_r_alloc,
+        cost_break_even=cost_break_even,
+        validation_status=status,
         cost_r=cost_r,
         confidence=sc.get("confidence"),
         reasons=reasons,
@@ -438,7 +634,13 @@ def build_opportunity_book(
     3. The winning side must not be macro-blocked and must clear the R:R
        floor when a ladder exists (the floors stay enforced on trades).
     """
+    # tp_probs is the FULL census table (``{"long": {...}, "short": {...},
+    # "families": {family: {...}}, "rungs_rr": [...]}``) - both sides
+    # receive it so the per-family distribution can be selected inside
+    # ``_side_opportunity`` (Stage-10: a candidate uses its OWN family's
+    # first-touch table, never the pooled side average).
     symbol = str(report.get("symbol", "?"))
+    tp_all = tp_probs or {}
     long_opp = _side_opportunity(
         report,
         "long",
@@ -447,7 +649,7 @@ def build_opportunity_book(
         spread_points=spread_points,
         slippage_pips=slippage_pips,
         pip_size=pip_size,
-        tp_probs=(tp_probs or {}).get("long"),
+        tp_probs=tp_all,
     )
     short_opp = _side_opportunity(
         report,
@@ -457,17 +659,31 @@ def build_opportunity_book(
         spread_points=spread_points,
         slippage_pips=slippage_pips,
         pip_size=pip_size,
-        tp_probs=(tp_probs or {}).get("short"),
+        tp_probs=tp_all,
     )
 
-    ev_l = long_opp.expected_r
-    ev_s = short_opp.expected_r
+    # Stage-10 decision basis: the allocation-aware target-level EV when it
+    # exists (the honest economics of the scaling-out plan), else the
+    # whole-ladder target-level EV, else the ranking EV. Ranking EV alone
+    # (P x ladder-best) is never the primary decision variable - Stage-2/3
+    # showed it overstates the payoff the ladder delivers.
+    def _decision_ev(opp: Opportunity) -> Optional[float]:
+        if opp.expected_r_alloc is not None:
+            return opp.expected_r_alloc
+        if opp.ev_target_level is not None:
+            return opp.ev_target_level
+        return opp.expected_r
+
+    ev_l = _decision_ev(long_opp)
+    ev_s = _decision_ev(short_opp)
     verdict_reasons: List[
         str
     ] = []  # Path 1: no calibrated probability on either side -> engine-confirmed
     # rule path (both existing engines already enforce structure gates).
     # When BOTH engines are confirmed, the higher engine score decides
-    # (evidence-driven, never an arbitrary long-first list order).
+    # (evidence-driven, never an arbitrary long-first list order). The rule
+    # path also cannot promote a FALSIFIED family - the hard gate below
+    # applies to the chosen side there too.
     if ev_l is None and ev_s is None:
         confirmed = [
             o
@@ -476,6 +692,20 @@ def build_opportunity_book(
         ]
         if confirmed:
             chosen = max(confirmed, key=lambda o: _engine_score(report, o.direction))
+            if chosen.rejection_reasons and any(
+                "FALSIFIED" in r for r in chosen.rejection_reasons
+            ):
+                verdict = {
+                    "direction": "flat",
+                    "status": "FLAT",
+                    "expected_r": None,
+                    "reason": (
+                        f"rule path: engine-confirmed {chosen.direction.upper()} "
+                        "blocked - family FALSIFIED (research: hypothesis "
+                        "rejected)"
+                    ),
+                }
+                return _book(symbol, long_opp, short_opp, verdict)
             chosen.taken = True
             verdict_reasons.append(
                 "rule path (no calibrated ML probability): engine-confirmed "
@@ -519,11 +749,15 @@ def build_opportunity_book(
         }
         return _book(symbol, long_opp, short_opp, verdict)
 
-    # The EV winner must still clear the book's hard floors (R:R + macro).
-    if other is not None and (other.expected_r or 0) > (chosen.expected_r or 0):
+    # The EV winner must still clear the book's hard floors (R:R + macro +
+    # family validation). A FALSIFIED family winner is FLAT - the
+    # architecture can discover it but never trade it (Stage-10 spec #13).
+    if other is not None and (_decision_ev(other) or 0) > (_decision_ev(chosen) or 0):
         chosen, other = other, chosen
     hard_blocked = [
-        r for r in chosen.rejection_reasons if "floor" in r or "BLOCKED" in r
+        r
+        for r in chosen.rejection_reasons
+        if "floor" in r or "BLOCKED" in r or "FALSIFIED" in r
     ]
     if hard_blocked:
         verdict = {
@@ -543,14 +777,29 @@ def build_opportunity_book(
     chosen.rejection_reasons = []
     verdict_reasons.append(
         f"EV path: {chosen.direction.upper()} "
-        f"EV {chosen.expected_r:+.2f}R > "
+        f"EV {_decision_ev(chosen):+.2f}R (target-level allocation) > "
         f"{'short' if chosen.direction == 'long' else 'long'} "
-        f"{other.expected_r if other is not None and other.expected_r is not None else 'n/a'}"
+        f"{_decision_ev(other) if other is not None and _decision_ev(other) is not None else 'n/a'}"
+    )
+    # Stage-10 live/research separation (spec #13): the verdict's
+    # ``validation_status`` carries the family's research classification
+    # (PRODUCTION-VALIDATED / PROMISING-SHADOW-ONLY / UNVALIDATED /
+    # FALSIFIED). A non-PRODUCTION-VALIDATED winner is a SHADOW-ONLY
+    # research candidate - the decision mechanism (TRADE/RULE/CONFIRMED)
+    # is unchanged, but consumers (plan, alerts, audit) must label it
+    # SHADOW-ONLY and never treat it as production-validated alpha. No
+    # family is PRODUCTION-VALIDATED yet: the frozen Stage-9 LONG reversal
+    # is PROMISING/SHADOW-ONLY until the fresh-window gate closes.
+    verdict_reasons.append(
+        f"family {chosen.setup_family} is {chosen.validation_status} "
+        "(SHADOW-ONLY unless PRODUCTION-VALIDATED)"
     )
     verdict = {
         "direction": chosen.direction,
         "status": "TRADE" if chosen.probability is not None else "RULE",
         "expected_r": chosen.expected_r,
+        "validation_status": chosen.validation_status,
+        "shadow_only": chosen.validation_status != PRODUCTION_VALIDATED,
         "reason": "; ".join(verdict_reasons),
     }
     return _book(symbol, long_opp, short_opp, verdict)
@@ -594,14 +843,27 @@ def format_opportunity_book(book: Dict) -> str:
             f"  probability: {'-' if opp.get('probability') is None else f'{opp['probability']:.0%}'}"
         )
         lines.append(
-            f"  EV         : {'-' if opp.get('expected_r') is None else f'{opp['expected_r']:+.2f}R'}"
+            f"  EV(ranking): {'-' if opp.get('expected_r') is None else f'{opp['expected_r']:+.2f}R'}  "
+            f"(comparison only)"
         )
-        if opp.get("ev_target_level") is not None:
+        if opp.get("expected_r_alloc") is not None:
+            lines.append(
+                f"  EV(alloc)  : {opp['expected_r_alloc']:+.2f}R "
+                f"(target-level, 1/3-1/3-1/3 allocation - DECISION EV)"
+            )
+        elif opp.get("ev_target_level") is not None:
             lines.append(
                 f"  EV(tl)     : {opp['ev_target_level']:+.2f}R (target-level, spec #4)"
             )
+        if opp.get("cost_break_even") is not None:
+            lines.append(
+                f"  cost break-even: {opp['cost_break_even']:.3f}R "
+                f"(edge gone above this - realistic {opp['cost_r']:.3f}R)"
+            )
         lines.append(
-            f"  R:R        : {'-' if opp.get('rr') is None else f'{opp['rr']:.2f}'} · cost {opp['cost_r']:.3f}R"
+            f"  R:R        : {'-' if opp.get('rr') is None else f'{opp['rr']:.2f}'} "
+            f"(ladder best, supplementary) · cost {opp['cost_r']:.3f}R · "
+            f"family {opp.get('validation_status') or '-'}"
         )
         if opp.get("entry_zone"):
             kind = (opp.get("entry_type") or "limit").upper()

@@ -308,18 +308,39 @@ def trade_plan(report: Dict) -> Dict:
         plan["pw_rr"] = setup_cls.get("pw_rr")
         plan["setup_evidence"] = setup_cls.get("evidence")
 
-    # Opportunity-book verdict merge (two-sided campaign, forensic fix):
-    # the action column must reflect the FULL opportunity space, not just
-    # the 200-SMA-gated engine confirmations. When the EV-driven book
-    # produces a TRADE verdict with concrete levels, that side wins the
-    # action - a SELL-LIMIT can now fire above the 200-SMA when the short
-    # hypothesis has higher expected value, and vice versa. The engine
-    # path stays as the fallback for reports without a book (or a book
-    # without a TRADE verdict).
+    # Opportunity-book verdict merge (two-sided campaign, forensic fix;
+    # Stage-10 arbitration): the action column must reflect the FULL
+    # opportunity space, not just the 200-SMA-gated engine confirmations.
+    # When the EV-driven book produces a TRADE verdict with concrete
+    # levels, that side wins the action - a SELL-LIMIT can now fire above
+    # the 200-SMA when the short hypothesis has higher expected value, and
+    # vice versa. CRITICALLY (Stage-10): a FLAT book verdict is a
+    # LEGITIMATE statistical decision ("neither side clears the EV floor",
+    # "EV winner fails a hard gate", "family FALSIFIED") - it must
+    # override any engine confirmation so a BUY-LIMIT/SELL-LIMIT never
+    # fires on a book that explicitly said FLAT. The engine path stays as
+    # the fallback for reports without a book (or a book without any
+    # verdict).
     book = report.get("opportunity_book") or {}
     vd = book.get("verdict") or {}
     sym = str(report.get("symbol", "?"))
-    if vd.get("direction") in ("long", "short") and vd.get("status") == "TRADE":
+    if vd.get("direction") == "flat" and vd.get("status") == "FLAT":
+        plan["direction"] = "neutral"
+        plan["status"] = "NO_SETUP"
+        plan["action"] = "NO-SETUP"
+        plan["decision_source"] = "opportunity_book"
+        plan["book_flat_reason"] = vd.get("reason") or "book verdict FLAT"
+        plan["summary"] = (
+            f"{sym}: FLAT - the EV-driven book found no acceptable "
+            f"opportunity on either side ({plan['book_flat_reason']})"
+        )
+        plan["what_changes"] = (
+            f"FLAT is the statistical decision: {plan['book_flat_reason']}. "
+            "A long would need a side that clears the EV floor with "
+            "positive cost-adjusted target-level EV; a short needs the same "
+            "with independently validated evidence."
+        )
+    elif vd.get("direction") in ("long", "short") and vd.get("status") == "TRADE":
         opp = book.get(vd["direction"]) or {}
         zone = opp.get("entry_zone")
         if zone:
@@ -423,6 +444,8 @@ def format_plan(plan: Dict) -> str:
             f"(long evid {plan.get('long_evidence', 0):.2f} / "
             f"short evid {plan.get('short_evidence', 0):.2f}){ev_txt}"
         )
+    if plan.get("book_flat_reason"):
+        lines.append(f"   FLAT (book): {plan['book_flat_reason']}")
     if other.get("entry_zone") and plan["status"] == "WATCH":
         lines.append(
             f"   Opposite watch: pending "
@@ -461,16 +484,16 @@ def print_plan_table(
         return 1
 
     header = (
-        f"{'SYMBOL':<8}{'CLOSE':>11}  {'ACTION':<30}{'SETUP':<24}"
-        f"{'LONG (stage · zone · stop · target)':<40}"
-        f"{'SHORT (stage · zone · stop · target)':<40}{'ML':>10}  "
+        f"{'SYMBOL':<8}{'CLOSE':>11}  {'ACTION':<24}{'SETUP':<24}"
+        f"{'BOOK':<24}{'LONG (stage · zone)':<24}"
+        f"{'SHORT (stage · zone)':<24}{'ML':>10}  "
         f"{'RATING':<16}{'GATE':<8}"
     )
-    print("\n" + "=" * 152)
-    print("NEXUSQUANT TRADE PLAN — DECISION TABLE")
-    print("=" * 152)
+    print("\n" + "=" * 170)
+    print("NEXUSQUANT TRADE PLAN — DECISION TABLE (EV-driven book verdicts)")
+    print("=" * 170)
     print(header)
-    print("-" * 152)
+    print("-" * 170)
 
     n = 0
     for sym in symbols:
@@ -489,12 +512,20 @@ def print_plan_table(
 
         def _side(side_dict: Dict) -> str:
             if not side_dict.get("entry_zone"):
-                return f"{side_dict.get('stage') or '-':<14} -"
-            return (
-                f"{(side_dict.get('stage') or ''):<14} {side_dict['entry_zone']:<14} "
-                f"{'-' if side_dict.get('stop') is None else f'{side_dict['stop']:,.4f}':<11} "
-                f"{'-' if side_dict.get('target') is None else f'{side_dict['target']:,.4f}'}"
-            )
+                return f"{side_dict.get('stage') or '-':<10} -"
+            return f"{(side_dict.get('stage') or ''):<10} {side_dict['entry_zone']:<14}"
+
+        book = (report.get("opportunity_book") or {}).get("verdict") or {}
+        book_dir = (book.get("direction") or "-").upper()
+        if book.get("expected_r") is not None:
+            book_txt = f"{book_dir} {book.get('expected_r'):+.2f}R"
+        else:
+            book_txt = book_dir
+        if book.get("shadow_only") is not None:
+            book_txt += " " + ("SHADOW" if book.get("shadow_only") else "PROD")
+        if book.get("reason"):
+            book_txt += " · " + (book.get("reason") or "")[:40]
+        book_txt = book_txt[:24]
 
         ml = f"{plan.get('ml_long_pct', 0) or 0:.0f}%/{plan.get('ml_short_pct', 0) or 0:.0f}%"
         rating = (
@@ -505,18 +536,19 @@ def print_plan_table(
             "-" if plan["direction"] == "neutral" else "?"
         )
         print(
-            f"{sym:<8}{report['last_close']:>11,.3f}  {plan['action']:<30}{setup:<24}"
-            f"{_side(plan['long']):<40}{_side(plan['short']):<40}"
+            f"{sym:<8}{report['last_close']:>11,.3f}  {plan['action']:<24}{setup:<24}"
+            f"{book_txt:<24}{_side(plan['long']):<24}{_side(plan['short']):<24}"
             f"{ml:>10}  {rating:<16}{gate:<8}"
         )
         n += 1
-    print("-" * 152)
+    print("-" * 170)
     print(
-        f"{n} symbol(s) · BUY/SELL-LIMIT = place the order at that zone now; "
-        f"WAIT-* = pending limit, not confirmed yet; NO-SETUP = stand aside. "
-        f"See the institutional report per symbol for full detail."
+        f"{n} symbol(s) · action = the OPPORTUNITY-BOOK verdict (target-level EV, "
+        f"1/3-1/3-1/3 allocation, costs included); NO-SETUP with a FLAT book = "
+        f"statistical FLAT, not absence of data. See the institutional report "
+        f"per symbol for full detail."
     )
-    print("=" * 152 + "\n")
+    print("=" * 170 + "\n")
     return 0
 
 

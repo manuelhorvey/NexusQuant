@@ -819,13 +819,29 @@ def print_report(report: Dict[str, Any]) -> None:
             fam = opp.get("setup_family") or "-"
             p = opp.get("probability")
             ev = opp.get("expected_r")
+            eva = opp.get("expected_r_alloc")
+            evt = opp.get("ev_target_level")
+            bev = opp.get("cost_break_even")
+            vstat = opp.get("validation_status") or "-"
+            ev_disp = (
+                f"{eva:+.2f}R"
+                if eva is not None
+                else f"{evt:+.2f}R"
+                if evt is not None
+                else ("-" if ev is None else f"{ev:+.2f}R")
+            )
             print(
                 f"   {side.upper():<6} {fam:<26} P "
                 f"{'-' if p is None else f'{p:.0%}':>4} · "
-                f"EV {'-' if ev is None else f'{ev:+.2f}R':>8} · "
-                f"RR {opp.get('rr') if opp.get('rr') is not None else '-':<5} · "
-                f"{'TAKEN' if opp.get('taken') else 'rejected'}"
+                f"EV(alloc) {ev_disp:>9} · "
+                f"ranking {('-' if ev is None else f'{ev:+.2f}R'):>8} · "
+                f"RR(ladder) {opp.get('rr') if opp.get('rr') is not None else '-':<5} · "
+                f"[{vstat}] · {'TAKEN' if opp.get('taken') else 'rejected'}"
             )
+            if bev is not None:
+                print(
+                    f"       cost break-even {bev:+.3f}R · realistic cost {opp.get('cost_r'):.3f}R"
+                )
             rej = opp.get("rejection_reasons") or []
             for r in rej[:3]:
                 print(f"       ✗ {r}")

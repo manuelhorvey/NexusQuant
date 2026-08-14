@@ -484,6 +484,40 @@ def _target_level_stats(stats: Dict, costs: tuple = (0.0, 0.05, 0.10, 0.15)) -> 
     return out
 
 
+def _family_target_level_stats(stats: Dict) -> Dict:
+    """Per-family empirical P(TP_k before SL) from the multi-barrier
+    outcome table (``outcome_family``), keyed by family name.
+
+    This is the family-level validation base for the Stage-10 census: the
+    LIVE book should consume a FAMILY-specific TP distribution (the
+    ``target_probs.json`` pooled table is a universe-level approximation),
+    so a SHORT_BREAKDOWN candidate is priced with SHORT_BREAKDOWN's own
+    first-touch distribution, never the pooled short average.
+    """
+    out = {}
+    for (fam, mb), n in stats["outcome_family"].items():
+        fam = str(fam)
+        cell = out.setdefault(
+            fam,
+            {"tp1": 0, "tp2": 0, "tp3": 0, "sl": 0},
+        )
+        if mb in cell:
+            cell[mb] += n
+    res = {}
+    for fam, c in out.items():
+        total = c["tp1"] + c["tp2"] + c["tp3"] + c["sl"]
+        if not total:
+            continue
+        res[fam] = {
+            "tp1": round(c["tp1"] / total, 4),
+            "tp2": round(c["tp2"] / total, 4),
+            "tp3": round(c["tp3"] / total, 4),
+            "sl": round(c["sl"] / total, 4),
+            "n": total,
+        }
+    return res
+
+
 def target_probs_json(stats: Dict) -> Dict:
     """The empirical per-side TP distribution as a JSON-safe table.
 
@@ -507,6 +541,18 @@ def target_probs_json(stats: Dict) -> Dict:
         },
         "rungs_rr": list(RUNG_RR),
         "n": {s: tl[s].get("n") for s in ("long", "short")},
+        # Stage-10: per-family distributions - the audit's required
+        # decision basis (a candidate's EV must use its OWN family's
+        # first-touch distribution, not the pooled one).
+        "families": _family_target_level_stats(stats),
+    }
+
+
+def family_target_probs_json(stats: Dict) -> Dict:
+    """The per-family TP distribution table alone (JSON-safe)."""
+    return {
+        "families": _family_target_level_stats(stats),
+        "rungs_rr": list(RUNG_RR),
     }
 
 

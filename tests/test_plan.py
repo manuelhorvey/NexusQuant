@@ -186,9 +186,20 @@ class TestDecidePlan(unittest.TestCase):
         self.assertEqual(plan["decision_source"], "opportunity_book")
         self.assertTrue(plan["long"]["active"])
 
-    def test_book_flat_verdict_leaves_engine_plan_intact(self):
-        """A FLAT book verdict must not fabricate an action."""
+    def test_book_flat_verdict_is_recorded_decision(self):
+        """Stage-10: a FLAT book verdict is a legitimate statistical
+        decision - it must override any engine confirmation and be
+        recorded as the decision source, never silently ignored (the old
+        behavior let the engine path re-fire a trade the book rejected)."""
         report = _mk_report(
+            dip={
+                "dip_stage": "Confirmed",
+                "dip_score": 7,
+                "dip_confirmed": True,
+                "entry_zone": (1.1000, 1.1050),
+                "invalidation_level": 1.0950,
+                "target": 1.1200,
+            },
             opportunity_book={
                 "symbol": "TEST",
                 "long": {"direction": "long", "expected_r": 0.03},
@@ -199,12 +210,15 @@ class TestDecidePlan(unittest.TestCase):
                     "expected_r": 0.03,
                     "reason": "neither side clears EV floor",
                 },
-            }
+            },
         )
         plan = trade_plan(report)
+        # Even with the dip engine CONFIRMED, the book's FLAT wins.
         self.assertEqual(plan["direction"], "neutral")
+        self.assertEqual(plan["status"], "NO_SETUP")
         self.assertEqual(plan["action"], "NO-SETUP")
-        self.assertNotIn("decision_source", plan)
+        self.assertEqual(plan["decision_source"], "opportunity_book")
+        self.assertIn("EV floor", plan["book_flat_reason"])
 
     def test_long_reachable_below_sma200(self):
         """200-SMA is context, not a lock (spec #9): with price BELOW the
