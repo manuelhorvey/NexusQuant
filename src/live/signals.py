@@ -765,4 +765,14 @@ def format_briefing(result: Dict) -> str:
             f"arbitrated by EV —"
         )
     lines.append("\n" + foot)
+    # Stage-10 portfolio selection footer: show how many proposed orders
+    # survived the cluster/concurrent/heat caps (and why the rest dropped).
+    pf = result.get("portfolio") or {}
+    pf_summary = (pf.get("summary") or {}).get("n_rejected", 0)
+    if pf_summary:
+        from src.live.portfolio import format_portfolio_summary
+
+        txt = format_portfolio_summary(pf)
+        if txt:
+            lines.append(txt)
     return "\n".join(lines)

@@ -54,6 +54,39 @@ def _load_settings() -> dict:
         return {}
 
 
+def _record_report(report: dict, tp_probs: Optional[dict] = None) -> Optional[dict]:
+    """Persist one decision-time snapshot for the Stage-11 prospective
+    window (``--record``). Only reports that carry an opportunity-book
+    verdict are recorded; every decision - LONG, SHORT and FLAT - accrues
+    an immutable snapshot so the frozen protocol can later resolve what
+    actually happened, including counterfactuals of rejected candidates.
+    """
+    try:
+        from src.live.recorder import record_live_snapshot
+
+        return record_live_snapshot(report, portfolio_state=None, tp_probs=tp_probs)
+    except Exception as exc:  # recording must never break the pass
+        logging.warning(
+            "prospective record failed for %s: %s", report.get("symbol"), exc
+        )
+        return None
+
+
+def _load_tp_probs() -> Optional[dict]:
+    """The census per-family target-probability table (data/validation/
+    target_probs.json), when present - embedded in snapshots so the
+    decision-time probability assumptions are frozen with the record."""
+    try:
+        import json
+
+        p = Path("data/validation/target_probs.json")
+        if p.exists():
+            return json.loads(p.read_text())
+    except Exception:
+        return None
+    return None
+
+
 def _book_verdict_direction(alert: dict) -> Optional[str]:
     """Opportunity-book verdict direction for an alert's report (None when
     the report carries no book - e.g. an older or degraded path)."""
@@ -86,7 +119,7 @@ def merge_pass_alerts(long_alerts: List[dict], short_alerts: List[dict]) -> tupl
 
     kept: List[dict] = []
     conflicts = 0
-    for sym, alerts in by_symbol.items():
+    for _sym, alerts in by_symbol.items():
         has_long = any(a.get("direction") != "short" for a in alerts)
         has_short = any(a.get("direction") == "short" for a in alerts)
         if not (has_long and has_short):
@@ -116,6 +149,7 @@ def diagnostics_reports(
     timeframe: str,
     symbols: Optional[List[str]] = None,
     data_dir: str = "data/raw",
+    record: bool = False,
 ) -> int:
     """
     Directional diagnostics (campaign spec #24): per symbol, the full
@@ -147,6 +181,8 @@ def diagnostics_reports(
             report = generate_full_report(
                 df, symbol=sym, group=group, data_dir=data_dir, mtf=False
             )
+            if record:
+                _record_report(report, tp_probs=_load_tp_probs())
             ob = report.get("opportunity_book")
             if ob:
                 print(format_opportunity_book(ob))
@@ -166,6 +202,7 @@ def institutional_reports(
     symbols: Optional[List[str]] = None,
     data_dir: str = "data/raw",
     use_hmm: bool = False,
+    record: bool = False,
 ) -> int:
     """
     Full institutional report (all 18 sections) per symbol - the plan's
@@ -200,6 +237,8 @@ def institutional_reports(
                 mtf=True,
                 use_hmm=use_hmm,
             )
+            if record:
+                _record_report(report, tp_probs=_load_tp_probs())
             print_report(report)
             n += 1
         except Exception as exc:
@@ -291,6 +330,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=None,
         help="fraction of equity risked per trade (default from settings)",
     )
+    parser.add_argument(
+        "--record",
+        action="store_true",
+        help="Stage-11: persist immutable decision-time snapshots for the "
+        "prospective accumulation window (every verdict incl. FLAT; "
+        "works with --format diagnostics/institutional and the live pass)",
+    )
     parser.add_argument("--state-file", default="data/live/alerts.json")
     parser.add_argument(
         "--expiry",
@@ -368,11 +414,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     channels = build_channels(live_cfg)
 
     if args.format == "institutional":
-        n = institutional_reports(group, timeframe, symbols, use_hmm=args.hmm)
+        n = institutional_reports(
+            group, timeframe, symbols, use_hmm=args.hmm, record=args.record
+        )
         return 0 if n else 1
 
     if args.format == "diagnostics":
-        n = diagnostics_reports(group, timeframe, symbols)
+        n = diagnostics_reports(group, timeframe, symbols, record=args.record)
         return 0 if n else 1
 
     if args.format == "plan":
@@ -419,7 +467,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     def _merge_long_short(long: dict, short: dict) -> dict:
         merged = dict(long)
         alerts, conflicts = merge_pass_alerts(long["new_alerts"], short["new_alerts"])
-        merged["new_alerts"] = alerts
+        # Stage-10 portfolio selection: after the EV-driven merge, cap the
+        # proposed orders by currency-cluster concentration / max concurrent
+        # / heat - the research already showed one-per-cluster cuts
+        # drawdown, and the orders must not silently exceed it.
+        from src.live.portfolio import select_portfolio_orders
+
+        portfolio = select_portfolio_orders(alerts)
+        merged["new_alerts"] = portfolio["kept"]
+        merged["portfolio"] = {
+            "summary": portfolio["summary"],
+            "rejected": portfolio["rejected"],
+        }
         merged["conflicts_resolved"] = conflicts
         merged["candidates"] = long["candidates"] + short["candidates"]
         merged["skipped_dup"] = long["skipped_dup"] + short["skipped_dup"]
@@ -431,11 +490,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         return merged
 
     def _one_pass() -> dict:
+        res = None
         if args.mode == "short":
-            return _one_pass_short()
-        if args.mode == "both":
-            return _merge_long_short(_one_pass_long(), _one_pass_short())
-        return _one_pass_long()
+            res = _one_pass_short()
+        elif args.mode == "both":
+            res = _merge_long_short(_one_pass_long(), _one_pass_short())
+        else:
+            res = _one_pass_long()
+        # Stage-11: with --record, every candidate that produced an alert
+        # (its report carries the decision) accrues an immutable snapshot.
+        if args.record:
+            tp_probs = _load_tp_probs()
+            for alert in res.get("new_alerts", []):
+                rep = alert.get("report")
+                if rep:
+                    _record_report(rep, tp_probs=tp_probs)
+        return res
 
     def _emit(res: dict) -> None:
         briefing = format_briefing(res)
