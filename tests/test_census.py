@@ -151,7 +151,9 @@ class TestCensus(unittest.TestCase):
         self.assertIn("family_uniform", stats)
         # At least one family must have a resolved uniform outcome (the
         # census must measure all families' outcomes, not stay empty).
-        self.assertGreater(sum(1 for k in stats["family_uniform"] if k.endswith("_RESOLVED")), 0)
+        self.assertGreater(
+            sum(1 for k in stats["family_uniform"] if k.endswith("_RESOLVED")), 0
+        )
         # Win/Loss keys only appear alongside a RESOLVED count.
         for k, v in stats["family_uniform"].items():
             self.assertGreaterEqual(v, 0)
@@ -178,11 +180,13 @@ class TestRatioDispersion(unittest.TestCase):
     def test_computes_dispersion_across_symbols(self):
         from collections import Counter, defaultdict
 
-        stats = {"by_symbol": defaultdict(lambda: {"long": Counter(), "short": Counter()})}
+        stats = {
+            "by_symbol": defaultdict(lambda: {"long": Counter(), "short": Counter()})
+        }
         for sym, (ls, ss) in {
-            "A": (10, 1),   # ratio 10.0 (most skewed)
-            "B": (2, 10),   # ratio 0.2
-            "C": (5, 5),    # ratio 1.0
+            "A": (10, 1),  # ratio 10.0 (most skewed)
+            "B": (2, 10),  # ratio 0.2
+            "C": (5, 5),  # ratio 1.0
         }.items():
             stats["by_symbol"][sym]["long"]["signals"] = ls
             stats["by_symbol"][sym]["short"]["signals"] = ss
@@ -196,7 +200,9 @@ class TestRatioDispersion(unittest.TestCase):
     def test_requires_three_symbols(self):
         from collections import Counter, defaultdict
 
-        stats = {"by_symbol": defaultdict(lambda: {"long": Counter(), "short": Counter()})}
+        stats = {
+            "by_symbol": defaultdict(lambda: {"long": Counter(), "short": Counter()})
+        }
         for sym, (ls, ss) in {"A": (4, 2), "B": (4, 2)}.items():
             stats["by_symbol"][sym]["long"]["signals"] = ls
             stats["by_symbol"][sym]["short"]["signals"] = ss
@@ -205,7 +211,9 @@ class TestRatioDispersion(unittest.TestCase):
     def test_skips_symbols_without_both_side_signals(self):
         from collections import Counter, defaultdict
 
-        stats = {"by_symbol": defaultdict(lambda: {"long": Counter(), "short": Counter()})}
+        stats = {
+            "by_symbol": defaultdict(lambda: {"long": Counter(), "short": Counter()})
+        }
         for sym, (ls, ss) in {"A": (4, 2), "B": (6, 2), "C": (0, 3)}.items():
             stats["by_symbol"][sym]["long"]["signals"] = ls
             stats["by_symbol"][sym]["short"]["signals"] = ss

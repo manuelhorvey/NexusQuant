@@ -107,6 +107,28 @@ class TestDirectionVerdict(unittest.TestCase):
         self.assertGreater(s["long_score"], s["short_score"])
         self.assertGreater(s["long_score"], 0.5)
 
+    def test_verdict_matches_strict_score_comparison(self):
+        # Side-neutrality invariant: the verdict must be a STRICT function
+        # of the evidence scores. long iff long_score strictly exceeds
+        # short_score (and clears the bar); short iff strictly below; an
+        # exact tie or sub-bar evidence -> FLAT. A long-first `>=` tie-break
+        # would violate this (exact tie resolving to LONG).
+        frames = [
+            _trending_frame(up=True),
+            _trending_frame(up=False),
+            _trending_frame(n=300, up=True, vol=0.25),
+            _trending_frame(n=500, up=False, vol=0.2),
+        ]
+        for df in frames:
+            s = classify_setup(df)
+            lo, sh = s["long_score"], s["short_score"]
+            if lo > sh and lo >= 0.35:
+                self.assertEqual(s["direction"], "long")
+            elif sh > lo and sh >= 0.35:
+                self.assertEqual(s["direction"], "short")
+            else:
+                self.assertEqual(s["direction"], "flat")
+
     def test_no_200sma_universal_gate(self):
         # A breakdown below the 200-SMA must be able to produce a SHORT
         # verdict, and - critically - the classifier must allow LONG
@@ -210,9 +232,7 @@ class TestExpectedValue(unittest.TestCase):
         # A legitimate 0.0 calibrated probability must survive the
         # prob_long fallback (explicit None checks, not truthiness).
         df = _trending_frame(up=True)
-        s = classify_setup(
-            df, ml={"prob": 0.9, "prob_long": 0.0, "prob_short": 0.8}
-        )
+        s = classify_setup(df, ml={"prob": 0.9, "prob_long": 0.0, "prob_short": 0.8})
         self.assertEqual(s["prob_long"], 0.0)
         self.assertEqual(s["prob_short"], 0.8)
 

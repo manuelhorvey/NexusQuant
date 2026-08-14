@@ -18,8 +18,10 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from src.analysis.opportunity import (
     build_opportunity_book,
+    entry_type_for,
     format_opportunity_book,
     roundtrip_cost_r,
+    target_level_ev,
 )
 from src.risk.run import currency_exposure
 
@@ -287,6 +289,166 @@ class TestOpportunityBook(unittest.TestCase):
         self.assertEqual(book["verdict"]["direction"], "flat")
         book2 = build_opportunity_book(rep, min_ev=0.1)
         self.assertEqual(book2["verdict"]["direction"], "long")
+
+
+class TestEntryType(unittest.TestCase):
+    """Immediate (market) vs pending (limit) entry classification."""
+
+    def test_market_when_entry_at_close(self):
+        # entry == close -> dist 0 ATR -> market
+        self.assertEqual(entry_type_for(1.1000, 1.1000, 0.0100), "market")
+
+    def test_market_within_atr_frac(self):
+        # 0.002 away with ATR 0.01 -> 0.2 ATR <= 0.25 -> market
+        self.assertEqual(entry_type_for(1.1020, 1.1000, 0.0100), "market")
+
+    def test_limit_beyond_atr_frac(self):
+        # 0.005 away with ATR 0.01 -> 0.5 ATR > 0.25 -> limit
+        self.assertEqual(entry_type_for(1.1050, 1.1000, 0.0100), "limit")
+
+    def test_limit_defaults_without_data(self):
+        self.assertEqual(entry_type_for(None, 1.10, 0.01), "limit")
+        self.assertEqual(entry_type_for(1.10, None, 0.01), "limit")
+        self.assertEqual(entry_type_for(1.10, 1.10, None), "limit")
+        self.assertEqual(entry_type_for(1.10, 1.10, 0.0), "limit")
+
+    def test_book_entry_type_reflects_close_distance(self):
+        # entry 1.1000, close 1.1000, ATR 0.01 -> market on the long side
+        rep = _report(
+            last_close=1.1000,
+            volatility={"atr_14": 0.01},
+        )
+        book = build_opportunity_book(rep)
+        self.assertEqual(book["long"]["entry_type"], "market")
+
+    def test_audjpy_style_short_flip_beats_confirmed_dip(self):
+        """Regression (spec #8): the dip engine CONFIRMS a long, but the
+        short thesis has higher expected value - the final verdict MUST be
+        SHORT. This is the AUDJPY 2026-08-13 case: long EV ~+0.5R vs
+        short EV ~+0.9R. A long-priority gate must never win over EV."""
+        rep = _report(
+            # dip engine fully confirmed - the old architecture would
+            # unconditionally print BUY-LIMIT here
+            dip={"dip_confirmed": True, "dip_score": 6},
+            setup_classification={
+                "direction": "long",
+                "long_families": {"LONG_BUY_DIP": 0.9, "LONG_TREND_CONTINUATION": 0.3},
+                "short_families": {
+                    "SHORT_TREND_CONTINUATION": 0.5,
+                    "SHORT_SELL_RALLY": 0.2,
+                },
+                "prob_long": 0.38,
+                "prob_short": 0.48,
+                "confidence": 0.4,
+            },
+            short_targets={
+                "best_rr": 3.0,
+                "min_rr_tp": "TP3",
+                "targets": [
+                    {"target": "TP1", "rr": 1.0, "price": 1.09},
+                    {"target": "TP2", "rr": 2.0, "price": 1.06},
+                    {"target": "TP3", "rr": 3.0, "price": 1.03},
+                ],
+            },
+        )
+        book = build_opportunity_book(rep)
+        lo, so = book["long"], book["short"]
+        # Both hypotheses are generated and compete.
+        self.assertIsNotNone(lo["expected_r"])
+        self.assertIsNotNone(so["expected_r"])
+        self.assertGreater(so["expected_r"], lo["expected_r"])
+        # The statistically stronger side wins, despite the confirmed dip.
+        self.assertEqual(book["verdict"]["direction"], "short")
+        self.assertEqual(book["verdict"]["status"], "TRADE")
+        self.assertTrue(so["taken"])
+
+    def test_flat_when_both_ev_below_floor_even_if_long_better(self):
+        """Regression (spec #7): when BOTH sides are below the EV floor the
+        answer must be FLAT - never a forced pick of the slightly-better
+        side. A system that always picks a direction is broken."""
+        rep = _report(
+            setup_classification={
+                "direction": "long",
+                "long_families": {"LONG_TREND_CONTINUATION": 0.5},
+                "short_families": {"SHORT_BREAKDOWN": 0.4},
+                "prob_long": 0.30,
+                "prob_short": 0.28,
+                "confidence": 0.3,
+            },
+        )
+        book = build_opportunity_book(rep)
+        vd = book["verdict"]
+        self.assertEqual(vd["direction"], "flat")
+        self.assertEqual(vd["status"], "FLAT")
+        self.assertIn("EV floor", vd["reason"])
+        self.assertFalse(book["long"]["taken"])
+        self.assertFalse(book["short"]["taken"])
+
+    def test_market_entry_recomputes_rr_from_fill(self):
+        """A market entry fills at ~the close: risk/reward and the ladder
+        R:R must be re-expressed from the fill, never the zone level."""
+        rep = _report(
+            last_close=1.1000,
+            volatility={"atr_14": 0.01},
+            targets={
+                "best_rr": 3.0,
+                "min_rr_tp": "TP3",
+                "targets": [
+                    {"target": "TP1", "rr": 1.0, "price": 1.11},
+                    {"target": "TP2", "rr": 2.0, "price": 1.12},
+                    {"target": "TP3", "rr": 3.0, "price": 1.13},
+                ],
+            },
+        )
+        lo = build_opportunity_book(rep)["long"]
+        self.assertEqual(lo["entry_type"], "market")
+        # Fill at the close, not the zone level.
+        self.assertEqual(lo["entry_zone"], [1.10, 1.10])
+        # Ladder best re-expressed from close: |1.13 - 1.10| / 0.01 = 3.0.
+        self.assertEqual(lo["rr"], 3.0)
+
+    def test_book_entry_type_limit_when_zone_away(self):
+        # entry 1.1000, close 1.1100, ATR 0.01 -> 1.0 ATR -> limit
+        rep = _report(
+            last_close=1.1100,
+            volatility={"atr_14": 0.01},
+        )
+        book = build_opportunity_book(rep)
+        self.assertEqual(book["long"]["entry_type"], "limit")
+
+
+class TestTargetLevelEv(unittest.TestCase):
+    """Target-level expected value from the payoff distribution (spec #4)."""
+
+    def test_ev_from_payoff_distribution(self):
+        # P(tp1)=0.5, P(tp2)=0.25, P(tp3)=0.1, P(sl)=0.15 (sums to 1.0)
+        ev = target_level_ev(0.5, 0.25, 0.1, 0.15)
+        self.assertEqual(ev, round(0.5 * 1 + 0.25 * 2 + 0.1 * 3 - 0.15, 4))
+
+    def test_ev_with_cost(self):
+        ev = target_level_ev(0.5, 0.25, 0.1, 0.15, cost_r=0.10)
+        self.assertEqual(ev, round(0.5 * 1 + 0.25 * 2 + 0.1 * 3 - 0.15 - 0.10, 4))
+
+    def test_inconsistent_distribution_returns_none(self):
+        # Mass exceeds 1.0 -> not a valid distribution -> no fabricated EV.
+        self.assertIsNone(target_level_ev(0.6, 0.4, 0.2, 0.3))
+        # Missing probability -> None.
+        self.assertIsNone(target_level_ev(None, 0.25, 0.1, 0.15))
+
+    def test_book_reports_target_level_ev_when_supplied(self):
+        rep = _report()
+        tp = {"tp1": 0.5, "tp2": 0.25, "tp3": 0.1, "sl": 0.15}
+        book = build_opportunity_book(rep, tp_probs={"long": tp, "short": tp})
+        # Ranking EV (decision number) stays the documented approximation.
+        self.assertEqual(book["long"]["expected_r"], round(0.6 * 3.0 - 0.4 - 0.05, 4))
+        # Long rungs 1/2/3: 0.5*1+0.25*2+0.1*3-0.15-cost(0.05) = 1.10
+        self.assertEqual(book["long"]["ev_target_level"], 1.10)
+        # Short rungs 1/2 (no TP3): 0.5*1+0.25*2+0.1*0-0.15-cost(0.05) = 0.80
+        self.assertEqual(book["short"]["ev_target_level"], 0.80)
+
+    def test_book_omits_target_level_ev_without_table(self):
+        book = build_opportunity_book(_report())
+        self.assertIsNone(book["long"]["ev_target_level"])
 
 
 class TestCostModel(unittest.TestCase):

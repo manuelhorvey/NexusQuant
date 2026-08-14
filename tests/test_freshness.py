@@ -150,6 +150,18 @@ class TestFreshnessReport(unittest.TestCase):
         self.assertEqual(s["stale"], 1)
         self.assertEqual(s["missing"], 0)
 
+    def test_summary_handles_empty_group(self):
+        """Regression: a group with no reportable parquet (e.g. mixed-CSV
+        dirs like data/raw/cot) returned a column-less empty frame and
+        crashed the freshness check with KeyError 'status'."""
+        empty = pd.DataFrame()
+        s = summary(empty)
+        self.assertEqual(s["total"], 0)
+        self.assertEqual(s["fresh"], 0)
+        self.assertEqual(s["stale"], 0)
+        self.assertEqual(s["missing"], 0)
+        self.assertIsNone(s["max_age_days"])
+
 
 class TestIncrementalUpdate(unittest.TestCase):
     def setUp(self):

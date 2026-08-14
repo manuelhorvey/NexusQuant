@@ -59,10 +59,46 @@ def _dip_label(r: dict) -> str:
 
 
 def _ml_label(r: dict) -> str:
-    ml = r.get("ml")
-    if not ml or ml.get("prob_pct") is None:
+    ml = r.get("ml") or {}
+    ms = r.get("ml_short") or {}
+    long_p = ml.get("prob_pct")
+    short_p = ms.get("prob_pct")
+    if long_p is None and short_p is None:
         return "-"
-    return f"{ml['prob_pct']:.0f}% {ml.get('label', '')}".strip()
+    return (
+        f"{long_p:.0f}%/{short_p:.0f}%"
+        if long_p is not None and short_p is not None
+        else f"{long_p or short_p:.0f}% (one-sided)"
+    )
+
+
+def _short_label(r: dict) -> str:
+    """Short-side opportunity: family · P · EV from the opportunity book."""
+    ob = r.get("opportunity_book") or {}
+    so = ob.get("short") or {}
+    fam = so.get("setup_family") or "-"
+    p = so.get("probability")
+    ev = so.get("expected_r")
+    bits = [fam]
+    if p is not None:
+        bits.append(f"P {p:.0%}")
+    if ev is not None:
+        bits.append(f"EV {ev:+.2f}R")
+    return " ".join(bits)
+
+
+def _book_label(r: dict) -> str:
+    """Opportunity-book verdict: LONG/SHORT/FLAT + EV."""
+    ob = r.get("opportunity_book") or {}
+    vd = ob.get("verdict") or {}
+    d = vd.get("direction")
+    if d is None:
+        return "-"
+    ev = vd.get("expected_r")
+    txt = d.upper()
+    if ev is not None:
+        txt += f" {ev:+.2f}R"
+    return txt
 
 
 def _setup_label(r: dict) -> str:
@@ -151,9 +187,10 @@ def main(argv=None) -> int:
     print("=" * 132)
 
     hdr = (
-        f"{'SYMBOL':<8}{'CLOSE':>10}  {'ACTION':<26}{'REGIME (D1|MTF|CLUSTER)':<28}"
-        f"{'DIP':<18}{'ML':>8}  {'MACRO':<22}{'SETUP (E/S/T · R)':<40}"
-        f"{'SUP':>14}{'RES':>14}  {'PATTERN':<22}{'RATING':<16}{'STRESS':<12}"
+        f"{'SYMBOL':<8}{'CLOSE':>10}  {'ACTION':<26}{'REGIME (D1|MTF|CLUSTER)':<24}"
+        f"{'DIP':<17}{'ML L/S':>9}  {'MACRO':<20}{'LONG (E/S/T · R)':<26}"
+        f"{'SHORT (family · P · EV)':<30}{'BOOK':<14}{'SUP':>12}{'RES':>12}  "
+        f"{'PATTERN':<20}{'RATING':<14}{'STRESS':<12}"
     )
     print(hdr)
     print("-" * 132)
@@ -183,11 +220,11 @@ def main(argv=None) -> int:
         rating = f"{rt.get('prob_pct', '-')}% {rt.get('rating', '')}".strip()
         row = (
             f"{sym:<8}{r['last_close']:>10,.3f}  "
-            f"{_action_label(r):<26}{_regime_label(r):<28}{_dip_label(r):<18}"
-            f"{_ml_label(r):>8}  {_macro_label(r):<22}"
-            f"{_setup_label(r):<40}{_level_label(r, 'support'):>14}"
-            f"{_level_label(r, 'resistance'):>14}  "
-            f"{_pattern_label(r):<22}{rating:<16}{_stress_label(r):<12}"
+            f"{_action_label(r):<26}{_regime_label(r):<24}{_dip_label(r):<17}"
+            f"{_ml_label(r):>9}  {_macro_label(r):<20}"
+            f"{_setup_label(r):<26}{_short_label(r):<30}{_book_label(r):<14}"
+            f"{_level_label(r, 'support'):>12}{_level_label(r, 'resistance'):>12}  "
+            f"{_pattern_label(r):<20}{rating:<14}{_stress_label(r):<12}"
         )
         table_rows.append(row)
         print(row)

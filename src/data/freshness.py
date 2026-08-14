@@ -135,9 +135,20 @@ def freshness_report(
 
 
 def summary(report: pd.DataFrame) -> Dict:
-    """Counts by status + the max age, for the CLI one-liner."""
-    counts = report["status"].value_counts().to_dict()
-    ages = report["age_days"].dropna()
+    """Counts by status + the max age, for the CLI one-liner.
+
+    Robust to an empty/column-less frame (e.g. a group whose symbols were
+    filtered out by discovery) - the freshness check must never crash on
+    a group that happens to have no reportable parquet files.
+    """
+    counts = (
+        report["status"].value_counts().to_dict() if "status" in report.columns else {}
+    )
+    ages = (
+        report["age_days"].dropna()
+        if "age_days" in report.columns
+        else pd.Series(dtype=float)
+    )
     return {
         "total": len(report),
         "fresh": int(counts.get("FRESH", 0)),

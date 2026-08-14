@@ -361,10 +361,7 @@ def scan_symbol(
             "PASS" if macro["gate"]["allowed"] else "BLOCKED" if macro else None
         ),
         "macro_gate_short": (
-            "PASS"
-            if macro["gate_short"]["allowed"]
-            else "BLOCKED"
-            if macro else None
+            "PASS" if macro["gate_short"]["allowed"] else "BLOCKED" if macro else None
         ),
         "rating": rating,
         "pattern": (

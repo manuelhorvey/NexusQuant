@@ -45,6 +45,12 @@ DEFAULT_MIN_ML_PROB = 0.55  # calibrated-probability floor for EV to count
 DEFAULT_COST_R = 0.05  # round-trip cost assumption in R when no
 #                               settings-derived cost is available
 
+# An entry within this fraction of a daily ATR of the last close is an
+# IMMEDIATE (market) order - the trigger is at price now. Beyond it the
+# order waits at the zone (limit). 0.25 means "within a quarter of a
+# daily ATR of the close".
+MARKET_ENTRY_ATR_FRAC = 0.25
+
 
 @dataclass
 class Opportunity:
@@ -63,6 +69,8 @@ class Opportunity:
     expected_r: Optional[float]
     cost_r: float
     confidence: Optional[float]
+    ev_target_level: Optional[float] = None  # honest payoff-distribution EV
+    entry_type: str = "limit"  # "market" when the entry is at/near the close
     reasons: List[str] = field(default_factory=list)
     rejection_reasons: List[str] = field(default_factory=list)
     taken: bool = False
@@ -79,11 +87,13 @@ class Opportunity:
                 if self.entry_zone is None
                 else [float(self.entry_zone[0]), float(self.entry_zone[1])]
             ),
+            "entry_type": self.entry_type,
             "invalidation": self.invalidation,
             "target": self.target,
             "rr": self.rr,
             "probability": self.probability,
             "expected_r": self.expected_r,
+            "ev_target_level": self.ev_target_level,
             "cost_r": self.cost_r,
             "confidence": self.confidence,
             "reasons": self.reasons,
@@ -95,6 +105,52 @@ class Opportunity:
 # ---------------------------------------------------------------------------
 # Cost model (spec #30: cost-aware decision making)
 # ---------------------------------------------------------------------------
+
+
+def entry_type_for(
+    entry: Optional[float],
+    close: Optional[float],
+    atr: Optional[float],
+    atr_frac: float = MARKET_ENTRY_ATR_FRAC,
+) -> str:
+    """Classify an entry as an immediate market order or a pending limit.
+
+    When the entry is within ``atr_frac`` of a daily ATR of the last
+    close, the trigger is at price NOW -> "market". Otherwise the order
+    waits at the zone -> "limit". Missing inputs default to "limit"
+    (never claim an immediate fill without the data to justify it).
+    """
+    if entry is None or close is None or atr is None or atr <= 0:
+        return "limit"
+    dist_atr = abs(entry - close) / atr
+    return "market" if dist_atr <= atr_frac else "limit"
+
+
+def target_level_ev(
+    p_tp1: Optional[float],
+    p_tp2: Optional[float],
+    p_tp3: Optional[float],
+    p_sl: Optional[float],
+    rungs: tuple = (1.0, 2.0, 3.0),
+    cost_r: float = 0.0,
+) -> Optional[float]:
+    """Expected value from the target-level payoff distribution (spec #4).
+
+    EV = P(tp1)*r1 + P(tp2)*r2 + P(tp3)*r3 - P(sl)*1 - cost_r, where
+    ``rungs`` are the ladder's R:R multiples and the distribution is the
+    empirical first-touch table {P(TP_k before SL), P(SL)}. A missing or
+    inconsistent distribution (does not sum to a valid probability mass)
+    returns None - never a fabricated EV.
+    """
+    if any(p is None for p in (p_tp1, p_tp2, p_tp3, p_sl)):
+        return None
+    total = p_tp1 + p_tp2 + p_tp3 + p_sl
+    # Tolerance absorbs rounding artifacts (a table summing to 1.0001 is a
+    # valid distribution; 1.15 is not).
+    if total <= 0 or total > 1.0 + 1e-3:
+        return None
+    ev = p_tp1 * rungs[0] + p_tp2 * rungs[1] + p_tp3 * rungs[2] - p_sl * 1.0 - cost_r
+    return round(float(ev), 4)
 
 
 def roundtrip_cost_r(
@@ -137,6 +193,7 @@ def _side_opportunity(
     spread_points: Optional[float],
     slippage_pips: Optional[float],
     pip_size: Optional[float],
+    tp_probs: Optional[Dict] = None,
 ) -> Opportunity:
     """Build the LONG or SHORT opportunity from one institutional report.
 
@@ -192,6 +249,37 @@ def _side_opportunity(
     ladder_best = targets.get("best_rr") or rr
     rr_ok = bool(targets.get("min_rr_tp"))
 
+    # Immediate vs pending: entry within a fraction of a daily ATR of the
+    # close is a MARKET order (trigger at price now), else LIMIT at the
+    # zone. The engines' pullback/rally zones are almost always away from
+    # price, so most opportunities stay LIMIT - but a breakout/breakdown
+    # at the trigger can now be an immediate entry.
+    close = report.get("last_close")
+    atr = (report.get("volatility") or {}).get("atr_14")
+    entry_type = entry_type_for(entry, close, atr)
+
+    # Market-fill honesty: a market order fills at ~the close, not at the
+    # modeled zone level - so risk, reward and the ladder's R:R must be
+    # re-expressed from the actual fill price. Without this a MARKET flag
+    # would silently claim the LIMIT-level R:R (spec: no unrealistic
+    # execution). When the fill is inside the stop or past the target the
+    # recompute is skipped and the LIMIT-level figures are kept.
+    if entry_type == "market" and close is not None and stop is not None:
+        risk_m = abs(float(close) - float(stop))
+        if risk_m > 0:
+            entry = float(close)
+            if target is not None and abs(float(target) - entry) > 0:
+                rr = round(abs(float(target) - entry) / risk_m, 2)
+            ladder = targets.get("targets") or []
+            rrs = [
+                abs(float(t["price"]) - entry) / risk_m
+                for t in ladder
+                if t.get("price") is not None
+            ]
+            if rrs:
+                ladder_best = round(max(rrs), 2)
+            rr_ok = ladder_best is not None and ladder_best >= min_rr
+
     cost_r = roundtrip_cost_r(
         entry,
         stop,
@@ -227,12 +315,42 @@ def _side_opportunity(
     # exist, EV is left None - assuming a 1.0R payoff would be a silent
     # fabrication against the campaign's own "no fake EV" principle, and
     # conservative FLAT is the honest behavior.
+    #
+    # Stage-2 (spec #4): when the empirical target-level distribution is
+    # supplied (tp_probs from the census), compute the honest payoff-
+    # distribution EV - P(TP1)*R1 + P(TP2)*R2 + P(TP3)*R3 - P(SL) - cost.
+    # This is reported as ``ev_target_level`` NEXT TO the ranking EV (the
+    # directional-probability x ladder-best approximation) so both are
+    # visible: the census shows the target-level EV is ~0 after costs,
+    # which the ranking EV does not reveal. The decision keeps using the
+    # ranking EV until the TP table is symbol-specific and the models are
+    # recalibrated (documented in the Stage-2 report).
     expected_r: Optional[float] = None
+    ev_target_level: Optional[float] = None
     payoff_basis: Optional[float] = None
     if prob is not None:
         p = float(prob)
-        # Conservative payoff: the ladder best R:R when it clears 1R, else
-        # the achieved RR. Only computed when one of them actually exists.
+        if tp_probs is not None:
+            # Real ladder rungs (TP1 < TP2 < TP3 R:R multiples); a missing
+            # rung contributes 0 payoff. The census table's TP_k maps to
+            # the ladder's k-th rung.
+            ladder_rrs = sorted(
+                t["rr"]
+                for t in (targets.get("targets") or [])
+                if t.get("rr") is not None
+            )
+            while len(ladder_rrs) < 3:
+                ladder_rrs.append(0.0)
+            ev_target_level = target_level_ev(
+                tp_probs.get("tp1"),
+                tp_probs.get("tp2"),
+                tp_probs.get("tp3"),
+                tp_probs.get("sl"),
+                rungs=tuple(ladder_rrs[:3]),
+                cost_r=cost_r,
+            )
+        # Ranking EV: conservative payoff (ladder best R:R when it clears
+        # 1R, else the achieved RR). Only computed when one exists.
         if ladder_best is not None and ladder_best >= 1.0:
             payoff_basis = ladder_best
         elif rr is not None:
@@ -270,11 +388,13 @@ def _side_opportunity(
         family_score=family_score,
         regime=regime,
         entry_zone=(entry, entry) if entry is not None else None,
+        entry_type=entry_type,
         invalidation=stop,
         target=target,
         rr=ladder_best if ladder_best is not None else rr,
         probability=prob,
         expected_r=expected_r,
+        ev_target_level=ev_target_level,
         cost_r=cost_r,
         confidence=sc.get("confidence"),
         reasons=reasons,
@@ -296,11 +416,17 @@ def build_opportunity_book(
     spread_points: Optional[float] = None,
     slippage_pips: Optional[float] = None,
     pip_size: Optional[float] = None,
+    tp_probs: Optional[Dict] = None,
 ) -> Dict:
     """Full opportunity book for one report: both sides + FLAT verdict.
 
     Returns ``{symbol, long, short, verdict, reasons}`` where ``verdict``
     is the decision engine's ``{direction, status, expected_r, reason}``.
+
+    ``tp_probs`` optionally carries the empirical per-side target-level
+    distribution ``{"long": {tp1, tp2, tp3, sl}, "short": {...}}`` from
+    the census (``--write-probs``); when supplied, EV is computed from
+    the true payoff distribution instead of the ladder-best approximation.
 
     Decision policy (EV-first, engine fallback):
 
@@ -321,6 +447,7 @@ def build_opportunity_book(
         spread_points=spread_points,
         slippage_pips=slippage_pips,
         pip_size=pip_size,
+        tp_probs=(tp_probs or {}).get("long"),
     )
     short_opp = _side_opportunity(
         report,
@@ -330,6 +457,7 @@ def build_opportunity_book(
         spread_points=spread_points,
         slippage_pips=slippage_pips,
         pip_size=pip_size,
+        tp_probs=(tp_probs or {}).get("short"),
     )
 
     ev_l = long_opp.expected_r
@@ -468,12 +596,17 @@ def format_opportunity_book(book: Dict) -> str:
         lines.append(
             f"  EV         : {'-' if opp.get('expected_r') is None else f'{opp['expected_r']:+.2f}R'}"
         )
+        if opp.get("ev_target_level") is not None:
+            lines.append(
+                f"  EV(tl)     : {opp['ev_target_level']:+.2f}R (target-level, spec #4)"
+            )
         lines.append(
             f"  R:R        : {'-' if opp.get('rr') is None else f'{opp['rr']:.2f}'} · cost {opp['cost_r']:.3f}R"
         )
         if opp.get("entry_zone"):
+            kind = (opp.get("entry_type") or "limit").upper()
             lines.append(
-                f"  entry      : {opp['entry_zone'][0]:,.5f} · stop "
+                f"  entry      : {kind} {opp['entry_zone'][0]:,.5f} · stop "
                 f"{'-' if opp.get('invalidation') is None else f'{opp['invalidation']:,.5f}'} · "
                 f"target {'-' if opp.get('target') is None else f'{opp['target']:,.5f}'}"
             )

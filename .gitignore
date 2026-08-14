@@ -58,6 +58,8 @@ data/processed/
 data/external/
 # Generated watchlist report dumps (scripts/run_watchlist.py).
 data/reports/
+# Stage validation outputs (src/analysis/stage*.py, census --write-probs).
+data/validation/
 # Local vendor fundamentals CSVs (equity Value/Quality factors).
 data/fundamentals/
 

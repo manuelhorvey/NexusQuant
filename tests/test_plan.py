@@ -98,6 +98,201 @@ class TestDecidePlan(unittest.TestCase):
         self.assertEqual(plan["long"]["stop"], 1.0950)
         self.assertIn("trigger", plan["what_changes"])
 
+    # ------------------------------------------------------------------
+    # Forensic fix: the plan action must reflect the FULL opportunity
+    # space (EV-driven opportunity book), not just the 200-SMA-gated
+    # engine confirmations. A SHORT can now fire above the 200-SMA when
+    # the book's short hypothesis has higher expected value.
+    # ------------------------------------------------------------------
+
+    def test_book_short_verdict_fires_sell_limit_above_sma200(self):
+        """Engine says NO-SETUP (no dip/rally confirmation) but the book
+        verdict is SHORT TRADE - the action must become SELL-LIMIT."""
+        report = _mk_report(
+            opportunity_book={
+                "symbol": "TEST",
+                "long": {
+                    "direction": "long",
+                    "setup_family": "LONG_TREND_CONTINUATION",
+                    "family_score": 0.4,
+                    "probability": 0.47,
+                    "expected_r": 0.87,
+                    "rr": 3.0,
+                    "entry_zone": [1.1000, 1.1000],
+                    "invalidation": 1.0950,
+                    "target": 1.1080,
+                },
+                "short": {
+                    "direction": "short",
+                    "setup_family": "SHORT_TREND_CONTINUATION",
+                    "family_score": 0.53,
+                    "probability": 0.60,
+                    "expected_r": 1.36,
+                    "rr": 3.0,
+                    "entry_zone": [1.1060, 1.1060],
+                    "invalidation": 1.1100,
+                    "target": 1.0980,
+                },
+                "verdict": {
+                    "direction": "short",
+                    "status": "TRADE",
+                    "expected_r": 1.36,
+                    "reason": "EV path: SHORT EV +1.36R > long +0.87R",
+                },
+            }
+        )
+        plan = trade_plan(report)
+        self.assertEqual(plan["direction"], "short")
+        self.assertEqual(plan["status"], "CONFIRMED")
+        self.assertEqual(plan["action"], "SELL-LIMIT 1.10600")
+        self.assertEqual(plan["decision_source"], "opportunity_book")
+        self.assertEqual(plan["expected_r"], 1.36)
+        self.assertTrue(plan["short"]["active"])
+        self.assertEqual(plan["short"]["stop"], 1.1100)
+        self.assertEqual(plan["short"]["target"], 1.0980)
+
+    def test_book_long_verdict_fires_buy_limit_when_engines_silent(self):
+        """Book LONG TRADE with no engine confirmation -> BUY-LIMIT."""
+        report = _mk_report(
+            opportunity_book={
+                "symbol": "TEST",
+                "long": {
+                    "direction": "long",
+                    "setup_family": "LONG_BREAKOUT_RETEST",
+                    "family_score": 0.4,
+                    "probability": 0.54,
+                    "expected_r": 1.12,
+                    "rr": 3.0,
+                    "entry_zone": [1.1000, 1.1000],
+                    "invalidation": 1.0950,
+                    "target": 1.1120,
+                },
+                "short": {
+                    "direction": "short",
+                    "setup_family": None,
+                    "expected_r": None,
+                },
+                "verdict": {
+                    "direction": "long",
+                    "status": "TRADE",
+                    "expected_r": 1.12,
+                    "reason": "EV path",
+                },
+            }
+        )
+        plan = trade_plan(report)
+        self.assertEqual(plan["direction"], "long")
+        self.assertEqual(plan["action"], "BUY-LIMIT 1.10000")
+        self.assertEqual(plan["decision_source"], "opportunity_book")
+        self.assertTrue(plan["long"]["active"])
+
+    def test_book_flat_verdict_leaves_engine_plan_intact(self):
+        """A FLAT book verdict must not fabricate an action."""
+        report = _mk_report(
+            opportunity_book={
+                "symbol": "TEST",
+                "long": {"direction": "long", "expected_r": 0.03},
+                "short": {"direction": "short", "expected_r": -0.04},
+                "verdict": {
+                    "direction": "flat",
+                    "status": "FLAT",
+                    "expected_r": 0.03,
+                    "reason": "neither side clears EV floor",
+                },
+            }
+        )
+        plan = trade_plan(report)
+        self.assertEqual(plan["direction"], "neutral")
+        self.assertEqual(plan["action"], "NO-SETUP")
+        self.assertNotIn("decision_source", plan)
+
+    def test_long_reachable_below_sma200(self):
+        """200-SMA is context, not a lock (spec #9): with price BELOW the
+        200-SMA but a LONG book verdict, the action must still be a long.
+        (Mirror of the short-above-200-SMA test - neither side may be
+        silently eliminated by the SMA relationship.)"""
+        report = _mk_report(
+            regime={"regime": "Bear Trend"},
+            price_vs_200sma=-0.012,  # close below the 200-SMA
+            opportunity_book={
+                "symbol": "TEST",
+                "long": {
+                    "direction": "long",
+                    "setup_family": "LONG_BREAKOUT_RETEST",
+                    "family_score": 0.5,
+                    "probability": 0.56,
+                    "expected_r": 1.23,
+                    "rr": 3.0,
+                    "entry_zone": [1.1000, 1.1000],
+                    "invalidation": 1.0900,
+                    "target": 1.1300,
+                },
+                "short": {"direction": "short", "expected_r": 0.4},
+                "verdict": {
+                    "direction": "long",
+                    "status": "TRADE",
+                    "expected_r": 1.23,
+                    "reason": "EV path",
+                },
+            },
+        )
+        plan = trade_plan(report)
+        self.assertEqual(plan["direction"], "long")
+        self.assertEqual(plan["action"], "BUY-LIMIT 1.10000")
+        self.assertEqual(plan["decision_source"], "opportunity_book")
+
+    def test_book_market_entry_produces_market_action(self):
+        """When the winning side's entry is at/near the close (within a
+        quarter ATR), the action must read BUY-MARKET/SELL-MARKET - an
+        immediate entry, not a pending limit."""
+        report = _mk_report(
+            last_close=1.1060,
+            volatility={"atr_14": 0.01},
+            opportunity_book={
+                "symbol": "TEST",
+                "long": {
+                    "direction": "long",
+                    "setup_family": "LONG_BREAKOUT",
+                    "family_score": 0.5,
+                    "probability": 0.6,
+                    "expected_r": 1.2,
+                    "rr": 3.0,
+                    "entry_type": "market",
+                    "entry_zone": [1.1060, 1.1060],
+                    "invalidation": 1.1000,
+                    "target": 1.1200,
+                },
+                "short": {"direction": "short", "expected_r": 0.3},
+                "verdict": {
+                    "direction": "long",
+                    "status": "TRADE",
+                    "expected_r": 1.2,
+                    "reason": "EV path",
+                },
+            },
+        )
+        plan = trade_plan(report)
+        self.assertEqual(plan["action"], "BUY-MARKET 1.10600")
+        self.assertEqual(plan["entry_type"], "MARKET")
+
+    def test_book_verdict_without_entry_keeps_engine_plan(self):
+        """A TRADE verdict without concrete levels must not override."""
+        report = _mk_report(
+            opportunity_book={
+                "symbol": "TEST",
+                "long": {"direction": "long", "expected_r": 1.0, "entry_zone": None},
+                "short": {"direction": "short", "expected_r": 0.5, "entry_zone": None},
+                "verdict": {
+                    "direction": "long",
+                    "status": "TRADE",
+                    "expected_r": 1.0,
+                },
+            }
+        )
+        plan = trade_plan(report)
+        self.assertEqual(plan["action"], "NO-SETUP")
+        self.assertNotIn("decision_source", plan)
+
     def test_confirmed_short_gives_sell_limit(self):
         report = _mk_report(
             rally={

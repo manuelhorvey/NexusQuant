@@ -307,6 +307,52 @@ def trade_plan(report: Dict) -> Dict:
         plan["ev"] = setup_cls.get("ev")
         plan["pw_rr"] = setup_cls.get("pw_rr")
         plan["setup_evidence"] = setup_cls.get("evidence")
+
+    # Opportunity-book verdict merge (two-sided campaign, forensic fix):
+    # the action column must reflect the FULL opportunity space, not just
+    # the 200-SMA-gated engine confirmations. When the EV-driven book
+    # produces a TRADE verdict with concrete levels, that side wins the
+    # action - a SELL-LIMIT can now fire above the 200-SMA when the short
+    # hypothesis has higher expected value, and vice versa. The engine
+    # path stays as the fallback for reports without a book (or a book
+    # without a TRADE verdict).
+    book = report.get("opportunity_book") or {}
+    vd = book.get("verdict") or {}
+    sym = str(report.get("symbol", "?"))
+    if vd.get("direction") in ("long", "short") and vd.get("status") == "TRADE":
+        opp = book.get(vd["direction"]) or {}
+        zone = opp.get("entry_zone")
+        if zone:
+            side = vd["direction"]
+            price = f"{float(zone[0]):.5f}" if len(zone) == 2 else str(zone[0])
+            plan["direction"] = side
+            plan["status"] = "CONFIRMED"
+            order_kind = (opp.get("entry_type") or "limit").upper()
+            plan["entry_type"] = order_kind
+            plan["action"] = (
+                f"{'BUY' if side == 'long' else 'SELL'}-{order_kind} {price}"
+            )
+            plan["decision_source"] = "opportunity_book"
+            plan["expected_r"] = vd.get("expected_r")
+            side_dict = plan["long"] if side == "long" else plan["short"]
+            side_dict.update(
+                {
+                    "active": True,
+                    "watch": False,
+                    "entry_zone": f"{float(zone[0]):.5f}-{float(zone[1]):.5f}"
+                    if len(zone) == 2
+                    else str(zone[0]),
+                    "stop": opp.get("invalidation"),
+                    "target": opp.get("target"),
+                    "best_rr": opp.get("rr"),
+                    "rr_ok": bool((opp.get("rr") or 0) >= 2.5),
+                }
+            )
+            plan["summary"] = (
+                f"{sym}: {plan['action']} - EV verdict "
+                f"({vd.get('expected_r') if vd.get('expected_r') is not None else 'n/a'}R) "
+                f"from opportunity book"
+            )
     return plan
 
 

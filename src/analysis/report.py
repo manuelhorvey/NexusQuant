@@ -62,6 +62,30 @@ def _direction_win_prob(sc: Dict) -> Optional[float]:
 
 
 _SETTINGS_CACHE: Optional[dict] = None
+_TP_PROBS_CACHE: Optional[dict] = None
+_TP_PROBS_LOADED = False
+
+
+def _load_target_probs() -> Optional[dict]:
+    """The empirical target-level TP distribution, memoized at module
+    level (universe scans generate one report per symbol). Returns None
+    when data/validation/target_probs.json is absent - the book then
+    falls back to the documented ladder-best EV approximation."""
+    global _TP_PROBS_CACHE, _TP_PROBS_LOADED
+    if not _TP_PROBS_LOADED:
+        _TP_PROBS_LOADED = True
+        try:
+            import json
+
+            from pathlib import Path as _P
+
+            p = _P("data/validation/target_probs.json")
+            if p.exists():
+                with open(p) as _f:
+                    _TP_PROBS_CACHE = json.load(_f)
+        except Exception:
+            _TP_PROBS_CACHE = None
+    return _TP_PROBS_CACHE
 
 
 def _settings_slippage_pips() -> Optional[float]:
@@ -242,6 +266,26 @@ def generate_full_report(
     except Exception:
         pass
 
+    # Multi-target ladder (institutional spec #11) - from the dip setup
+    # when actionable; makes a 2.5:1 minimum reachable via scaling out.
+    # Built BEFORE the risk plan: risk_plan_from_report reads
+    # report["targets"] for the honest ladder-best R:R (rr_ok on the
+    # 2.5:1 floor). Building it after risk left the setup stuck on the
+    # nearest-target R:R (~0.9) and mis-reported every long as "BELOW 2.5".
+    try:
+        from src.risk.targets import build_target_ladder
+
+        dip = report.get("dip") or {}
+        ez = dip.get("entry_zone")
+        inv = dip.get("invalidation_level")
+        if ez and inv:
+            entry = (float(ez[0]) + float(ez[1])) / 2.0
+            report["targets"] = build_target_ladder(
+                entry, float(inv), float(latest["close"]), report["levels"]
+            )
+    except Exception:
+        pass
+
     # Risk & position sizing plan - after the ML section so Kelly can use
     # the model probability (graceful: absent when no actionable setup).
     try:
@@ -274,22 +318,6 @@ def generate_full_report(
 
     # Pattern recognition (institutional spec #6)
     report["patterns"] = patterns_summary(df)
-
-    # Multi-target ladder (institutional spec #11) - from the dip setup
-    # when actionable; makes a 2.5:1 minimum reachable via scaling out.
-    try:
-        from src.risk.targets import build_target_ladder
-
-        dip = report.get("dip") or {}
-        ez = dip.get("entry_zone")
-        inv = dip.get("invalidation_level")
-        if ez and inv:
-            entry = (float(ez[0]) + float(ez[1])) / 2.0
-            report["targets"] = build_target_ladder(
-                entry, float(inv), float(latest["close"]), report["levels"]
-            )
-    except Exception:
-        pass
 
     # Final quant rating (institutional spec #14) - needs ml + macro +
     # volume sections, so it runs last.
@@ -453,12 +481,21 @@ def generate_full_report(
         # calibrated probabilities exist. Cost model: settings slippage
         # (pips, memoized) converted to R via the stop distance; JPY pairs
         # use 0.01 pips, everything else 0.0001.
+        #
+        # Stage-2 (spec #4): when the empirical target-level distribution
+        # exists (data/validation/target_probs.json, written by the census
+        # --write-probs), EV is computed from the true payoff distribution
+        # (P(TP_k before SL)) instead of the ladder-best approximation.
+        # Missing file -> None -> the documented approximation is used.
         try:
             from src.analysis.opportunity import build_opportunity_book
 
             pip = 0.01 if symbol.upper().endswith("JPY") else 0.0001
             report["opportunity_book"] = build_opportunity_book(
-                report, slippage_pips=_settings_slippage_pips(), pip_size=pip
+                report,
+                slippage_pips=_settings_slippage_pips(),
+                pip_size=pip,
+                tp_probs=_load_target_probs(),
             )
         except Exception:
             pass

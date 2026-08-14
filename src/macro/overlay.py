@@ -599,9 +599,9 @@ def gate_series(
         return pd.Series(True, index=index)
     aligned = align_scores(scores, index, shift_days=shift_days)
     allowed = aligned.apply(
-        lambda row: macro_gate(
-            symbol, row.to_dict(), min_bias, direction=direction
-        )["allowed"],
+        lambda row: macro_gate(symbol, row.to_dict(), min_bias, direction=direction)[
+            "allowed"
+        ],
         axis=1,
     )
     return allowed.fillna(True)

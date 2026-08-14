@@ -213,7 +213,8 @@ decider.
 
 | Check | Result |
 |-------|--------|
-| Full unit suite | **519 tests OK (2 skipped) in ~132s** — previously hung >600s |
+| Full unit suite (two-sided round) | **519 tests OK (2 skipped) in ~132s** — previously hung >600s |
+| Full unit suite (campaign round) | **565 tests OK (2 skipped) in ~139s** — +46 tests (setup classifier, census, opportunity book/EV, currency exposure) |
 | `ruff check` | clean |
 | `ruff format --check` | clean |
 | Census (real data) | direction-neutral long/short detection, both sides +EV |
@@ -255,7 +256,7 @@ portfolio exposure and a diagnostics view.
 | `src/risk/run.py` | ``currency_exposure()`` - currency-leg aggregation (long EURJPY = +EUR/-JPY; 3 JPY crosses = one JPY-short) with directional-concentration warnings; portfolio report + CLI show the leg view |
 | `src/live/run.py` | ``--format diagnostics`` (per-symbol opportunity book) |
 | `src/live/signals.py` | alerts prefixed `🟢 LONG` / `🔴 SHORT` (spec #43) |
-| `tests/test_opportunity.py` (NEW) | 16 tests: EV decision (long/short/flat), no-fabricated-probability, explainable rejections, macro-block, cost model, JPY pip scaling, currency exposure |
+| `tests/test_opportunity.py` (NEW) | 19 tests: EV decision (long/short/flat), no-fabricated-probability, explainable rejections, macro-block, cost model, JPY pip scaling, currency exposure, both-engines-confirmed tie-break, no-payoff-basis -> EV None |
 
 ### Decision policy (implemented in `build_opportunity_book`)
 
@@ -272,6 +273,12 @@ portfolio exposure and a diagnostics view.
    contradiction.
 4. Every non-taken opportunity carries explicit rejection reasons (evidence
    bar / no calibrated prob / EV<=0 / R:R floor / macro) - spec #25.
+5. **Post-review decision fixes**: when both engines are confirmed but no
+   calibrated probability exists on either side, the higher engine score
+   decides (never an arbitrary long-first list order); and a side with a
+   calibrated probability but **no target ladder / payoff basis** gets EV
+   `None` + a rejection reason rather than a fabricated 1.0R assumption -
+   conservative FLAT is the honest output.
 
 ### Example (live, USDCAD)
 
@@ -299,6 +306,231 @@ positions: LONG EURJPY + LONG GBPJPY + LONG CADJPY (100k each)
 -> exposure JPY: -300,000 (one shared JPY-short leg)
    WARN: JPY carries 50% of gross exposure - directional concentration
 ```
+
+---
+
+## 7c. Forensic Fix: Why the Watchlist Showed Zero Shorts
+
+Follow-up diagnosis on the production run:
+
+```bash
+./venv/bin/python scripts/run_watchlist.py EURUSD ... XAUUSD
+```
+
+produced `2 BUY-LIMIT · 4 WAIT-LONG · 7 NO-SETUP` and **zero shorts**. The
+forensic question was: does the market genuinely have no short opportunities,
+or is the architecture blind to them? **It is the latter - the opportunity
+space is NOT collapsed at discovery; it is collapsed at the decision and
+rendering layers.**
+
+### Root cause (four layers)
+
+1. **Engines are 200-SMA-gated** — `src/features/dip.py:125` requires
+   `close > SMA200` and `src/features/rally.py:126` requires `close < SMA200`
+   as hard score components. Engine confirmation is therefore structurally
+   impossible on the wrong side of the 200-SMA.
+2. **`decide_plan` only recognizes engine confirmations** —
+   `src/analysis/plan.py:102-124` is a priority chain over
+   `dip_confirmed`/`rally_confirmed`; `ml_pct`, `ml_short_pct`,
+   `long_rr_ok` and `short_rr_ok` are passed in but **never used** for the
+   action. Since the rally engine cannot confirm above the 200-SMA, the
+   plan action structurally could not print `SELL-LIMIT`.
+3. **`filter_signals` (live pass) is long-only** — `src/live/signals.py:53`
+   filters on `dip_score`/`dip_confirmed`; the short pass uses
+   `filter_short_signals` (rally-gated). Even the alerting layer only sees
+   engine-validated candidates.
+4. **The watchlist table rendered no short side** — ACTION + DIP + a single
+   ML probability; no RALLY / short / EV columns.
+
+Plus a **display bug (R:R)**: `report["risk"]` was built before
+`report["targets"]` in `generate_full_report`, so the long risk setup saw
+an empty ladder and reported the nearest-target R:R (~0.9) as "BELOW 2.5"
+for every symbol — even when the ladder best was 3.0 (the 2.5 floor was
+being enforced on the wrong figure, and the display made every long look
+unacceptable).
+
+### Evidence — the opportunity space exists (13-symbol forensic matrix)
+
+`scripts/diag_opportunity_matrix.py` (read-only diagnostic, same pipeline)
+proved every symbol generates BOTH hypotheses: short families
+(`SHORT_TREND_CONTINUATION` / `SHORT_BREAKDOWN` / `SHORT_BREAKDOWN_RETEST`)
+with calibrated P 40-60% and EV +0.6R to +1.37R. The EV-driven opportunity
+book verdict was **SHORT for 6/13 symbols** (USDJPY, USDCHF, NZDUSD,
+USDCAD, NZDJPY, AUDJPY) — but the plan action never surfaced it.
+
+### Fixes
+
+1. **`src/analysis/report.py`** — the long target ladder is now built
+   BEFORE the risk plan, so the setup reports the ladder-best R:R against
+   the 2.5 floor (`R 3.0 (OK 2.5)` instead of `R 0.9 (BELOW 2.5)`).
+2. **`src/analysis/plan.py` `trade_plan`** — the opportunity-book TRADE
+   verdict now drives the plan action (`BUY/SELL-LIMIT <entry>`, direction,
+   status, levels, `decision_source="opportunity_book"`, `expected_r`),
+   with the engine path kept as the fallback when no book verdict exists.
+   A SHORT can now fire above the 200-SMA when its EV wins, and AUDJPY
+   flips from an engine-confirmed BUY to SELL because short EV +0.92R >
+   long EV +0.50R (spec §12 behavior).
+3. **`scripts/run_watchlist.py`** — the table now shows `ML L/S`
+   (long/short probs), a `SHORT (family · P · EV)` column and a `BOOK`
+   verdict column, so the full opportunity space is visible per symbol.
+4. **`scripts/diag_opportunity_matrix.py`** (new, read-only) — per-symbol
+   long/short candidate matrix for future forensic runs.
+
+### Market vs limit entries (follow-up)
+
+The action space was previously **all limit orders** by construction: the
+long entry is the dip pullback zone (below price) and the short entry is
+the rally zone (above price), so the system could only ever say "wait for
+the zone", never "act now". No market-order path existed anywhere.
+
+Added `entry_type` to the opportunity book + plan (`src/analysis/opportunity.py`):
+
+* An entry within **0.25 of a daily ATR** of the last close is classified
+  `market` (the trigger is at price NOW) and the action reads
+  `BUY-MARKET`/`SELL-MARKET`; otherwise `limit`.
+* **Market-fill honesty**: a market order fills at ~the close, so risk /
+  reward / ladder R:R are re-expressed from the actual fill price
+  (never the zone-level R:R). This correctly lowered the EV of the two
+  immediate long candidates today, flipping AUDUSD and CHFJPY to the
+  short side - the system will not claim a limit-level R:R for an
+  immediate entry.
+* `MARKET_ENTRY_ATR_FRAC = 0.25` is a module constant, and `entry_type_for`
+  is unit-tested (market at 0 ATR / within 0.2 ATR, limit beyond, missing
+  data defaults to limit).
+
+On 2026-08-13 the honest output is **1 immediate entry** (AUDJPY
+`SELL-MARKET`, fill 112.52, R:R 2.62) and 15 pending limits - the zones
+are genuinely away from price today. When a breakout/breakdown trigger is
+at price, the system now says MARKET.
+
+### Before vs after (same data, 2026-08-13)
+
+| | Before | After |
+|---|---|---|
+| BUY-LIMIT | 2 | 7 |
+| SELL-LIMIT | 0 | **6** (USDJPY, USDCHF, NZDUSD, USDCAD, NZDJPY, AUDJPY) |
+| WAIT-* | 4 WAIT-LONG | 0 (all now resolved to a side or stand-aside) |
+| NO-SETUP | 7 | 0 |
+| R:R display | R 0.81-1.25 "BELOW 2.5" | R 2.76-3.0 "OK 2.5" |
+| ML column | single prob | L/S probs (e.g. USDCAD 47%/60%) |
+| Short visibility | none | family · P · EV per symbol + BOOK verdict |
+
+Regression: full suite 570 tests OK (2 skipped), +5 new tests (book-verdict
+SELL-LIMIT above the 200-SMA, book FLAT leaves engine plan intact, book
+verdict without levels does not override, ladder-best R:R ordering).
+
+---
+
+## 7d. Stage-2 Forensic Validation (bidirectional recall, calibration, target-level EV)
+
+Second-stage validation of the two-sided architecture (spec: prove the
+short side is statistically real, not merely reachable). All numbers are
+from the extended census over the 16-symbol FX watchlist
+(40,059 bars, 2026-08-13):
+
+```bash
+python -m src.analysis.census --symbols <watchlist> --calibrate --write-probs
+```
+
+### Bidirectional opportunity recall (spec #2)
+
+| Metric | LONG | SHORT |
+|---|---|---|
+| Candidates | 5,764 | 3,599 |
+| Confirmed signals | 222 | 79 |
+| Signal rate | 3.9% | 2.2% |
+| Win rate (realized) | 57.2% | 59.5% |
+| Expectancy | +0.847R | +0.720R |
+| Long/short signal ratio | **2.81** | (both sides fire; not 1.0, not forced) |
+
+Both sides generate candidates on every symbol and both have positive
+realized expectancy. The 2.81 ratio is market evidence, not a gate
+(per-market dispersion: median 2.62, min 0.50 AUDCHF, max 20.00 CHFJPY).
+
+### Regime conditioning (spec #3) - natural, not balanced
+
+| Regime | L sig | L win% | L exp | S sig | S win% | S exp | L/S cand |
+|---|---|---|---|---|---|---|---|
+| Bear Trend | 0 | - | - | 61 | 61% | +0.21R | 0.10 |
+| Bull Trend | 117 | 55% | +0.09R | 0 | - | - | 11.42 |
+| Range / Chop | 97 | 57% | +0.13R | 16 | 62% | +0.25R | 2.07 |
+| High Volatility | 8 | 100% | +1.00R | 2 | 0% | -1.00R | 3.20 |
+
+The system is naturally short-heavy in bear regimes (L/S candidates
+0.10) and long-heavy in bull (11.42) - exactly the adaptive behavior
+required, with no artificial balancing.
+
+### Family coverage and parity (spec #10/#11)
+
+Uniform-outcome win rates (all candidates, causal 1R geometry):
+LONG_TREND_CONTINUATION 62.3% · SHORT_TREND_CONTINUATION 60.7% ·
+LONG_BUY_DIP 62.8% · LONG_BREAKOUT 61.8% · SHORT_SELL_RALLY 61.4% ·
+SHORT_BREAKDOWN 66.9% · LONG_MEAN_REVERSION 72.5% (n=41) ·
+SHORT_MEAN_REVERSION 50.8% (n=60). Eight of the twelve families have
+non-trivial samples; MEAN_REVERSION families and SHORT_BREAKDOWN have
+small samples and need more data before production eligibility.
+
+### Target-level EV (spec #4) - the honest number
+
+Multi-barrier first-touch over every classified candidate
+(rungs at 1R/2R/3R, stop at -1R, 1R = 1.25 x ATR):
+
+| Side | P(tp1) | P(tp2) | P(tp3) | P(sl) | EV @0 | @0.05R | @0.10R | @0.15R |
+|---|---|---|---|---|---|---|---|---|
+| LONG | 0.491 | 0.020 | 0.002 | 0.488 | +0.049 | -0.002 | -0.051 | -0.102 |
+| SHORT | 0.453 | 0.031 | 0.006 | 0.510 | +0.023 | -0.027 | -0.077 | -0.127 |
+
+**The target-level EV is ~zero and negative after any realistic cost** -
+the ladder-best x P approximation (+1.1R) massively overstates the edge.
+The live book now reports `ev_target_level` alongside the ranking EV so
+both are visible (e.g. USDCAD short: ranking +1.36R vs target-level
++0.00R; USDCAD long: +0.87R vs +0.53R because its nearest rung is at
+2.0R). Caveats: the TP table is population-level (not symbol-specific)
+and measured at 1.25xATR rungs, which are wider than most live ladder
+rungs - so per-symbol values are directional, not precise.
+
+### Independent LONG/SHORT model calibration (spec #5)
+
+| Side | n | mean pred | actual | Brier | ECE |
+|---|---|---|---|---|---|
+| LONG | 25,841 | 0.438 | 0.625 | 0.2810 | **0.2017** |
+| SHORT | 25,639 | 0.482 | 0.601 | 0.2593 | **0.1236** |
+
+Both models are **materially miscalibrated** (systematically
+under-confident: long predicts 44% where outcomes occur 63%) and are
+clearly independent (0.438 vs 0.482 - P(short)=1-P(long) is not the
+case). Calibration pools in-sample and out-of-sample bars, so ECE here
+is an upper bound on true OOS calibration, but the directional ranking
+is the only defensible use of these probabilities today.
+
+### Cost robustness (spec #12)
+
+See the EV sweep above: long expectancy +0.847R at the confirmed-signal
+level and +0.049R at target level @0 cost - the discrepancy itself is the
+finding. At 0.05R round-trip cost the target-level EV is ~0 for both
+sides, so **neither directional edge survives realistic costs under the
+current target-level model**.
+
+### Walk-forward framing (spec #13)
+
+The census is a per-bar causal walk-forward: every bar is classified on
+its own trailing window (no future levels/divergences/patterns), labels
+resolve forward-only (stop-first), and subsampling is per-bar
+deterministic. A purged/embargoed walk-forward with threshold selection
+restricted to the training folds (and a final untouched test fold) is a
+remaining gap, as are the ablation (spec #14) and multiple-testing
+(spec #15) studies.
+
+### Verdict
+
+**NOT PRODUCTION READY.** The architecture passes (both sides reachable,
+EV decides, natural regime asymmetry, FLAT works, AUDJPY-flip
+regression-tested) but the statistical evidence does not yet justify
+live capital: the directional probabilities are miscalibrated
+(ECE 0.20 / 0.12) and the honest target-level EV is ~0 after costs.
+The documented next steps are model recalibration + per-symbol TP
+probabilities, then a purged walk-forward with a genuinely untouched
+test fold.
 
 ---
 

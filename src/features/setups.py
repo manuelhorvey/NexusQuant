@@ -575,9 +575,11 @@ def classify_setup(
     long_score, short_score = best_long[1], best_short[1]
 
     # Direction verdict: evidence wins over the engines. FLAT when neither
-    # side clears the minimum evidence bar.
+    # side clears the minimum evidence bar OR the two sides tie exactly -
+    # an exact tie is no evidence for either direction (side-neutral: the
+    # market decides, never a long-first tie-break).
     MIN_EVIDENCE = 0.35
-    if long_score >= MIN_EVIDENCE and long_score >= short_score:
+    if long_score >= MIN_EVIDENCE and long_score > short_score:
         direction = "long"
     elif short_score >= MIN_EVIDENCE and short_score > long_score:
         direction = "short"

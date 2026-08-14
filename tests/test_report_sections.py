@@ -24,6 +24,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from src.features.indicators import add_all_indicators
 from src.features.regime import detect_regime
 from src.analysis.report import generate_full_report
+from src.data.loader import clean_data, load_data
 from src.macro.overlay import SECTOR_ETF, macro_sensitivities
 
 
@@ -52,6 +53,31 @@ def _prepared(n=400):
     df = add_all_indicators(df)
     df = detect_regime(df)
     return df
+
+
+class RiskOrderingTest(unittest.TestCase):
+    """Forensic fix: the long target ladder must be built BEFORE the risk
+    plan so the setup reports the ladder-best R:R against the 2.5 floor.
+    Before the fix the risk plan saw an empty ladder and every long setup
+    mis-reported the nearest-target R:R (~0.9) as 'BELOW 2.5'."""
+
+    def test_risk_rr_ok_reflects_ladder_best(self):
+        path = Path("data/raw/full_fx/EURUSD_D1.parquet")
+        if not path.exists():
+            self.skipTest("no EURUSD parquet")
+        df = clean_data(load_data(str(path), symbol="EURUSD"))
+        df = add_all_indicators(df)
+        df = detect_regime(df)
+        r = generate_full_report(df, symbol="EURUSD", group="full_fx")
+        t = r.get("targets") or {}
+        setup = (r.get("risk") or {}).get("setup") or {}
+        if t.get("best_rr") is None:
+            self.skipTest("no actionable long ladder today")
+        # The setup must have seen the SAME ladder the report stores, and
+        # its floor check must be the ladder-best R:R - not the nearest
+        # single-target R:R.
+        self.assertEqual(setup.get("best_rr"), t["best_rr"])
+        self.assertEqual(bool(setup.get("rr_ok")), t["best_rr"] >= 2.5)
 
 
 class ReportSectionsTest(unittest.TestCase):

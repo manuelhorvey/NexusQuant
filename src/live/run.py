@@ -61,9 +61,7 @@ def _book_verdict_direction(alert: dict) -> Optional[str]:
     return (book.get("verdict") or {}).get("direction")
 
 
-def merge_pass_alerts(
-    long_alerts: List[dict], short_alerts: List[dict]
-) -> tuple:
+def merge_pass_alerts(long_alerts: List[dict], short_alerts: List[dict]) -> tuple:
     """
     Combine the long and short pass alerts, resolving dual-fire symbols via
     the EV-driven opportunity book verdict.

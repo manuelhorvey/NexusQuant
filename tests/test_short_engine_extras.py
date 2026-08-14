@@ -284,7 +284,9 @@ class DirectionWinProbTest(unittest.TestCase):
         self.assertEqual(p, 0.7)
 
     def test_no_probability_returns_none(self):
-        p = self._win_prob({"direction": "short", "prob_long": None, "prob_short": None})
+        p = self._win_prob(
+            {"direction": "short", "prob_long": None, "prob_short": None}
+        )
         self.assertIsNone(p)
 
 
